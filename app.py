@@ -82,6 +82,7 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
             'codigoPessoa': cnpj_limpo,
             'dataInicial': data_ini,
             'dataFinal': data_fim,
+            'fase': 'PAG',
             'pagina': pagina,
         }
         try:
