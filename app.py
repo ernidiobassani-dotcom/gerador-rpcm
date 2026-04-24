@@ -8,6 +8,7 @@ import io
 import calendar
 import tempfile
 import os
+import subprocess
 from lxml import etree
 from docx import Document
 from docx.oxml.ns import qn
@@ -41,23 +42,77 @@ MESES_LISTA = [
     "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"
 ]
 
-# ─── Funções ────────────────────────────────────────────────────────────────
+# ODT namespaces
+NS_TEXT  = 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'
+NS_TABLE = 'urn:oasis:names:tc:opendocument:xmlns:table:1.0'
 
-def extrair_cnpj(file_bytes):
-    """Extrai CNPJ de qualquer arquivo Word (docx/dotx) sem depender do python-docx."""
+# ─── Funções de extração de CNPJ ────────────────────────────────────────────
+
+def extrair_cnpj_zip(file_bytes):
+    """Extrai CNPJ varrendo todos os XMLs de um arquivo ZIP (docx, dotx, odt)."""
+    padrao = re.compile(r'\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}')
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
-            with z.open('word/document.xml') as f:
-                content = f.read().decode('utf-8')
-        text = re.sub(r'<[^>]+>', ' ', content)
-        text = re.sub(r'\s+', ' ', text)
-        match = re.search(r'\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}', text)
-        return match.group() if match else None
+            for nome in z.namelist():
+                if not nome.endswith('.xml'):
+                    continue
+                try:
+                    conteudo = z.read(nome).decode('utf-8', errors='ignore')
+                    texto = re.sub(r'<[^>]+>', ' ', conteudo)
+                    texto = re.sub(r'\s+', ' ', texto)
+                    match = padrao.search(texto)
+                    if match:
+                        return match.group()
+                except Exception:
+                    continue
     except Exception:
-        return None
+        pass
+    return None
+
+def extrair_cnpj_doc(file_bytes):
+    """Extrai CNPJ de arquivo .doc (binário legacy) buscando no conteúdo."""
+    padrao = re.compile(r'\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}')
+    # Word .doc armazena texto internamente em UTF-16-LE
+    try:
+        texto = file_bytes.decode('utf-16-le', errors='ignore')
+        match = padrao.search(texto)
+        if match:
+            return match.group()
+    except Exception:
+        pass
+    # Fallback: latin-1
+    try:
+        texto = file_bytes.decode('latin-1', errors='ignore')
+        match = padrao.search(texto)
+        if match:
+            return match.group()
+    except Exception:
+        pass
+    # Fallback: strings via subprocess
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix='.doc', delete=False)
+        tmp.write(file_bytes)
+        tmp.close()
+        result = subprocess.run(['strings', tmp.name], capture_output=True, text=True, timeout=10)
+        match = padrao.search(result.stdout)
+        if match:
+            return match.group()
+    except Exception:
+        pass
+    return None
+
+def extrair_cnpj(file_bytes, ext='.docx'):
+    """Extrai CNPJ do documento de acordo com o formato."""
+    if ext in ('.docx', '.dotx', '.odt'):
+        return extrair_cnpj_zip(file_bytes)
+    elif ext == '.doc':
+        return extrair_cnpj_doc(file_bytes)
+    return None
 
 def limpar_cnpj(cnpj):
     return re.sub(r'[.\-/]', '', cnpj)
+
+# ─── API Portal da Transparência ────────────────────────────────────────────
 
 def get_pagamentos(cnpj_limpo, mes_num, ano):
     """Busca pagamentos via API oficial do Portal da Transparência."""
@@ -102,24 +157,23 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
             ultimo_erro = str(e)
             break
 
-    # Filtra pelo mês e monta lista de pagamentos
     pagamentos = []
     mes_str = f'{mes_num:02d}'
     for item in todos:
         data_pgto = item.get('data', item.get('dataDocumento', ''))
         data_str  = str(data_pgto)
-        # Formato BR: DD/MM/YYYY → mês em posição 3:5
         mes_ok = False
-        if len(data_str) >= 5 and data_str[2:3] == '/' and data_str[3:5] == mes_str:
-            mes_ok = True
-        elif len(data_str) >= 7 and data_str[4:5] == '-' and data_str[5:7] == mes_str:
+        if len(data_str) >= 7 and data_str[4:5] == '-' and data_str[5:7] == mes_str:
             mes_ok = True  # ISO: YYYY-MM-DD
+        elif len(data_str) >= 5 and data_str[2:3] == '/' and data_str[3:5] == mes_str:
+            mes_ok = True  # BR: DD/MM/YYYY
+        elif mes_str in data_str:
+            mes_ok = True  # fallback
         if not mes_ok:
             continue
         doc_num   = item.get('documentoResumido', '') or item.get('documento', '')
         valor_raw = item.get('valor', item.get('valorDocumento', '0'))
         try:
-            # valor vem como string no formato BR: "21.014,96"
             if isinstance(valor_raw, str):
                 v = float(valor_raw.replace('.', '').replace(',', '.'))
             else:
@@ -137,6 +191,8 @@ def formatar_valor(v):
 def calcular_total(pagamentos):
     total = sum(v for _, _, _, v in pagamentos)
     return '{:,.2f}'.format(total).replace(',', 'X').replace('.', ',').replace('X', '.')
+
+# ─── DOCX / DOTX ────────────────────────────────────────────────────────────
 
 def abrir_documento(file_bytes, filename):
     """Abre .docx ou .dotx com python-docx, convertendo .dotx se necessário."""
@@ -164,7 +220,7 @@ def abrir_documento(file_bytes, filename):
         return Document(dst)
 
 def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
-    """Atualiza mês/ano no cabeçalho e substitui a tabela de pagamentos."""
+    """Atualiza mês/ano no cabeçalho e substitui a tabela de pagamentos (DOCX)."""
     W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
     # 1. Cabeçalho
@@ -219,9 +275,176 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
 
     return doc
 
-def nome_saida(nome_entrada, mes_nome_arquivo):
+# ─── ODT ────────────────────────────────────────────────────────────────────
+
+def _odt_cell_text(cell):
+    """Extrai texto de uma célula ODT."""
+    partes = []
+    for node in cell.iter():
+        if node.text:
+            partes.append(node.text)
+        if node.tail:
+            partes.append(node.tail)
+    return ''.join(partes).strip()
+
+def _odt_set_cell_text(cell, texto):
+    """Define texto de uma célula ODT, preservando atributos de estilo da célula."""
+    NS_T = f'{{{NS_TEXT}}}'
+    # Encontra o primeiro parágrafo existente (para preservar estilo de parágrafo)
+    paragrafos = cell.findall(f'{NS_T}p')
+    if paragrafos:
+        p = paragrafos[0]
+        # Limpa conteúdo interno do parágrafo
+        for child in list(p):
+            p.remove(child)
+        p.text = texto
+        # Remove parágrafos extras
+        for extra in paragrafos[1:]:
+            cell.remove(extra)
+    else:
+        p = etree.SubElement(cell, f'{NS_T}p')
+        p.text = texto
+
+def _substituir_mes_ano_odt(tree, mes_abrev, ano):
+    """Substitui mês/ano em todos os nós de texto da árvore XML do ODT."""
+    meses_re = r'\b(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\b'
+    for node in tree.iter():
+        if node.text and re.search(meses_re, node.text):
+            node.text = re.sub(meses_re, mes_abrev, node.text)
+            node.text = re.sub(r'(?<=/)\d{4}', ano, node.text)
+        if node.tail and re.search(meses_re, node.tail):
+            node.tail = re.sub(meses_re, mes_abrev, node.tail)
+            node.tail = re.sub(r'(?<=/)\d{4}', ano, node.tail)
+
+def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
+    """Atualiza ODT: substitui mês/ano e reconstrói tabela de pagamentos."""
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+
+    NS_T = f'{{{NS_TEXT}}}'
+    NS_TB = f'{{{NS_TABLE}}}'
+
+    # Processa content.xml
+    content_xml = files.get('content.xml')
+    if content_xml is None:
+        raise ValueError("ODT inválido: content.xml não encontrado")
+
+    tree = etree.fromstring(content_xml)
+
+    # 1. Substituir mês/ano
+    _substituir_mes_ano_odt(tree, mes_abrev, ano)
+
+    # 2. Atualizar tabela de pagamentos
+    for table in tree.iter(f'{NS_TB}table'):
+        rows = table.findall(f'{NS_TB}table-row')
+        if len(rows) < 2:
+            continue
+        # Checa se o cabeçalho tem "DOCUMENTO"
+        header_cells = rows[0].findall(f'{NS_TB}table-cell')
+        if not header_cells:
+            continue
+        if 'DOCUMENTO' not in _odt_cell_text(header_cells[0]).upper():
+            continue
+
+        # Encontrou a tabela correta
+        template_row = rows[1]   # segunda linha = template de dados
+        total_row    = rows[-1]  # última linha  = total
+
+        # Remove linhas de dados (entre header e total)
+        for row in rows[1:-1]:
+            table.remove(row)
+
+        # Insere linhas de pagamento antes da linha de total
+        for doc_num, data, valor, _ in pagamentos:
+            new_row = copy.deepcopy(template_row)
+            cells = new_row.findall(f'{NS_TB}table-cell')
+            if len(cells) >= 3:
+                _odt_set_cell_text(cells[0], str(doc_num))
+                _odt_set_cell_text(cells[1], str(data))
+                _odt_set_cell_text(cells[2], str(valor))
+            total_row.addprevious(new_row)
+
+        # Atualiza valor total
+        total_cells = total_row.findall(f'{NS_TB}table-cell')
+        if len(total_cells) >= 2:
+            _odt_set_cell_text(total_cells[1], f'R$ {total_str}')
+        elif len(total_cells) == 1:
+            _odt_set_cell_text(total_cells[0], f'R$ {total_str}')
+        break
+
+    files['content.xml'] = etree.tostring(
+        tree, xml_declaration=True, encoding='UTF-8', standalone=True
+    )
+
+    # Atualiza styles.xml se houver (para cabeçalhos/rodapés)
+    if 'styles.xml' in files:
+        styles_tree = etree.fromstring(files['styles.xml'])
+        _substituir_mes_ano_odt(styles_tree, mes_abrev, ano)
+        files['styles.xml'] = etree.tostring(
+            styles_tree, xml_declaration=True, encoding='UTF-8', standalone=True
+        )
+
+    # Remonta o ZIP (mimetype deve ser primeiro e sem compressão)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+        if 'mimetype' in files:
+            info = zipfile.ZipInfo('mimetype')
+            info.compress_type = zipfile.ZIP_STORED
+            zout.writestr(info, files['mimetype'])
+        for n, d in files.items():
+            if n == 'mimetype':
+                continue
+            zout.writestr(n, d)
+    buf.seek(0)
+    return buf.read()
+
+# ─── DOC (legado) ───────────────────────────────────────────────────────────
+
+def processar_doc_libreoffice(file_bytes, filename, mes_abrev, ano, pagamentos, total_str):
+    """Tenta processar .doc via LibreOffice: converte para docx, processa, converte de volta."""
+    tmp_dir = tempfile.mkdtemp()
+    doc_path = os.path.join(tmp_dir, filename)
+    with open(doc_path, 'wb') as f:
+        f.write(file_bytes)
+
+    # .doc → .docx
+    result = subprocess.run(
+        ['libreoffice', '--headless', '--convert-to', 'docx', '--outdir', tmp_dir, doc_path],
+        capture_output=True, timeout=90
+    )
+    docx_path = os.path.join(tmp_dir, os.path.splitext(filename)[0] + '.docx')
+    if not os.path.exists(docx_path):
+        raise RuntimeError("LibreOffice não converteu o arquivo")
+
+    with open(docx_path, 'rb') as f:
+        docx_bytes = f.read()
+
+    doc = abrir_documento(docx_bytes, docx_path)
+    doc = atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str)
+
+    processed_path = os.path.join(tmp_dir, 'saida.docx')
+    doc.save(processed_path)
+
+    # .docx → .doc
+    subprocess.run(
+        ['libreoffice', '--headless', '--convert-to', 'doc', '--outdir', tmp_dir, processed_path],
+        capture_output=True, timeout=90
+    )
+    out_doc = os.path.join(tmp_dir, 'saida.doc')
+    if os.path.exists(out_doc):
+        with open(out_doc, 'rb') as f:
+            return f.read(), '.doc'
+
+    # Fallback: retorna como .docx
+    with open(processed_path, 'rb') as f:
+        return f.read(), '.docx'
+
+# ─── Utilitário ─────────────────────────────────────────────────────────────
+
+def nome_saida(nome_entrada, mes_nome_arquivo, ext_saida=None):
     """Deriva nome do arquivo de saída substituindo o mês."""
     base = os.path.splitext(nome_entrada)[0]
+    ext  = ext_saida if ext_saida else os.path.splitext(nome_entrada)[1]
     meses_re = '|'.join([
         'JANEIRO','FEVEREIRO','MARCO','MARÇO','ABRIL','MAIO','JUNHO',
         'JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO',
@@ -231,7 +454,7 @@ def nome_saida(nome_entrada, mes_nome_arquivo):
         rf'\b({meses_re})\b', mes_nome_arquivo,
         base.upper(), flags=re.IGNORECASE
     )
-    return novo + '.docx'
+    return novo + ext
 
 # ─── Interface ──────────────────────────────────────────────────────────────
 
@@ -244,8 +467,8 @@ st.info(
 )
 
 uploaded = st.file_uploader(
-    "📎 Selecione o documento base (.docx ou .dotx)",
-    type=["docx", "dotx"]
+    "📎 Selecione o documento base (.docx, .dotx, .odt ou .doc)",
+    type=["docx", "dotx", "odt", "doc"]
 )
 
 col1, col2 = st.columns(2)
@@ -266,6 +489,7 @@ if gerar and uploaded:
     mes_num = MESES_LISTA.index(mes_selecionado) + 1
     mes_abrev, mes_nome_arq = MESES[mes_num]
     ano = ano_input.strip()
+    ext_entrada = os.path.splitext(uploaded.name)[1].lower()
 
     progress = st.progress(0)
     status   = st.empty()
@@ -273,7 +497,7 @@ if gerar and uploaded:
 
     # PASSO 1 — CNPJ
     status.info("🔍 Lendo documento e extraindo CNPJ...")
-    cnpj = extrair_cnpj(file_bytes)
+    cnpj = extrair_cnpj(file_bytes, ext_entrada)
     progress.progress(15)
 
     if not cnpj:
@@ -308,23 +532,55 @@ if gerar and uploaded:
 
     # PASSO 3 — Gerar documento
     status.info("📝 Atualizando documento...")
-    doc = abrir_documento(file_bytes, uploaded.name)
-    doc = atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str)
+    ext_saida = ext_entrada
+    mime_type = 'application/octet-stream'
+
+    if ext_entrada == '.odt':
+        output_bytes = atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str)
+        ext_saida = '.odt'
+        mime_type = 'application/vnd.oasis.opendocument.text'
+
+    elif ext_entrada == '.doc':
+        # Tenta LibreOffice; se não disponível, orienta o usuário
+        try:
+            output_bytes, ext_saida = processar_doc_libreoffice(
+                file_bytes, uploaded.name, mes_abrev, ano, pagamentos, total_str
+            )
+            if ext_saida == '.docx':
+                st.warning(
+                    "⚠️ Não foi possível manter o formato `.doc`. "
+                    "O arquivo foi salvo como `.docx`."
+                )
+            mime_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        except Exception:
+            st.error(
+                "❌ **Formato `.doc` não suportado para processamento automático.**\n\n"
+                "O formato `.doc` (Word 97-2003) requer conversão prévia. "
+                "Por favor, abra o arquivo no Word e salve como **`.docx`**, "
+                "depois envie novamente."
+            )
+            st.stop()
+
+    else:
+        # DOCX / DOTX
+        doc = abrir_documento(file_bytes, uploaded.name)
+        doc = atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str)
+        buf = io.BytesIO()
+        doc.save(buf)
+        output_bytes = buf.getvalue()
+        ext_saida = '.docx'
+        mime_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
     progress.progress(90)
-
-    buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
-
-    output_name = nome_saida(uploaded.name, mes_nome_arq)
+    output_name = nome_saida(uploaded.name, mes_nome_arq, ext_saida)
     progress.progress(100)
     status.success("✅ Documento gerado com sucesso!")
 
     st.download_button(
         label=f"⬇️ Baixar {output_name}",
-        data=buf.read(),
+        data=output_bytes,
         file_name=output_name,
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        mime=mime_type,
         type="primary"
     )
 
