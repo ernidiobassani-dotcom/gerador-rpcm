@@ -102,40 +102,28 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
             ultimo_erro = str(e)
             break
 
-    # Debug: mostra primeiros itens da API antes de filtrar
-    import json as _json
-    if todos:
-        with st.expander(f"🔍 Debug API: {len(todos)} item(ns) retornado(s) no ano"):
-            st.code(_json.dumps(todos[:3], ensure_ascii=False, indent=2))
-    else:
-        st.warning(f"⚠️ Debug: API retornou 0 itens. Status={ultimo_status}. Erro={ultimo_erro}")
-
     # Filtra pelo mês e monta lista de pagamentos
     pagamentos = []
     mes_str = f'{mes_num:02d}'
     for item in todos:
-        data_pgto = item.get('dataDocumento', item.get('data', ''))
+        data_pgto = item.get('data', item.get('dataDocumento', ''))
         data_str  = str(data_pgto)
-        # Verifica se o mês aparece na posição correta
-        # Formato ISO: YYYY-MM-DD → posição 5:7
-        # Formato BR:  DD/MM/YYYY → posição 3:5
+        # Formato BR: DD/MM/YYYY → mês em posição 3:5
         mes_ok = False
-        if len(data_str) >= 7 and data_str[4:5] == '-' and data_str[5:7] == mes_str:
+        if len(data_str) >= 5 and data_str[2:3] == '/' and data_str[3:5] == mes_str:
+            mes_ok = True
+        elif len(data_str) >= 7 and data_str[4:5] == '-' and data_str[5:7] == mes_str:
             mes_ok = True  # ISO: YYYY-MM-DD
-        elif len(data_str) >= 5 and data_str[2:3] == '/' and data_str[3:5] == mes_str:
-            mes_ok = True  # BR: DD/MM/YYYY
-        elif mes_str in data_str:
-            mes_ok = True  # fallback genérico
         if not mes_ok:
             continue
-        doc_obj   = item.get('documento')
-        if isinstance(doc_obj, dict):
-            doc_num = doc_obj.get('codigoResumido', '') or doc_obj.get('codigo', '') or str(doc_obj)
-        else:
-            doc_num = str(doc_obj or '') or item.get('codigoDocumento', '')
-        valor_raw = item.get('valorDocumento', item.get('valor', 0))
+        doc_num   = item.get('documentoResumido', '') or item.get('documento', '')
+        valor_raw = item.get('valor', item.get('valorDocumento', '0'))
         try:
-            v = float(valor_raw)
+            # valor vem como string no formato BR: "21.014,96"
+            if isinstance(valor_raw, str):
+                v = float(valor_raw.replace('.', '').replace(',', '.'))
+            else:
+                v = float(valor_raw)
             pagamentos.append((doc_num, data_pgto, formatar_valor(v), v))
         except Exception:
             pass
