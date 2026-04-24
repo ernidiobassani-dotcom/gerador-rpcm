@@ -182,7 +182,7 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
         except Exception:
             pass
 
-    return pagamentos, ultimo_status, ultimo_erro
+    return pagamentos, ultimo_status, ultimo_erro, todos
 
 def formatar_valor(v):
     """Formata float para padrão brasileiro: R$ 1.234,56"""
@@ -290,15 +290,12 @@ def _odt_cell_text(cell):
 def _odt_set_cell_text(cell, texto):
     """Define texto de uma célula ODT, preservando atributos de estilo da célula."""
     NS_T = f'{{{NS_TEXT}}}'
-    # Encontra o primeiro parágrafo existente (para preservar estilo de parágrafo)
     paragrafos = cell.findall(f'{NS_T}p')
     if paragrafos:
         p = paragrafos[0]
-        # Limpa conteúdo interno do parágrafo
         for child in list(p):
             p.remove(child)
         p.text = texto
-        # Remove parágrafos extras
         for extra in paragrafos[1:]:
             cell.remove(extra)
     else:
@@ -324,37 +321,29 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
     NS_T = f'{{{NS_TEXT}}}'
     NS_TB = f'{{{NS_TABLE}}}'
 
-    # Processa content.xml
     content_xml = files.get('content.xml')
     if content_xml is None:
         raise ValueError("ODT inválido: content.xml não encontrado")
 
     tree = etree.fromstring(content_xml)
-
-    # 1. Substituir mês/ano
     _substituir_mes_ano_odt(tree, mes_abrev, ano)
 
-    # 2. Atualizar tabela de pagamentos
     for table in tree.iter(f'{NS_TB}table'):
         rows = table.findall(f'{NS_TB}table-row')
         if len(rows) < 2:
             continue
-        # Checa se o cabeçalho tem "DOCUMENTO"
         header_cells = rows[0].findall(f'{NS_TB}table-cell')
         if not header_cells:
             continue
         if 'DOCUMENTO' not in _odt_cell_text(header_cells[0]).upper():
             continue
 
-        # Encontrou a tabela correta
-        template_row = rows[1]   # segunda linha = template de dados
-        total_row    = rows[-1]  # última linha  = total
+        template_row = rows[1]
+        total_row    = rows[-1]
 
-        # Remove linhas de dados (entre header e total)
         for row in rows[1:-1]:
             table.remove(row)
 
-        # Insere linhas de pagamento antes da linha de total
         for doc_num, data, valor, _ in pagamentos:
             new_row = copy.deepcopy(template_row)
             cells = new_row.findall(f'{NS_TB}table-cell')
@@ -364,7 +353,6 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
                 _odt_set_cell_text(cells[2], str(valor))
             total_row.addprevious(new_row)
 
-        # Atualiza valor total
         total_cells = total_row.findall(f'{NS_TB}table-cell')
         if len(total_cells) >= 2:
             _odt_set_cell_text(total_cells[1], f'R$ {total_str}')
@@ -376,7 +364,6 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
         tree, xml_declaration=True, encoding='UTF-8', standalone=True
     )
 
-    # Atualiza styles.xml se houver (para cabeçalhos/rodapés)
     if 'styles.xml' in files:
         styles_tree = etree.fromstring(files['styles.xml'])
         _substituir_mes_ano_odt(styles_tree, mes_abrev, ano)
@@ -384,7 +371,6 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
             styles_tree, xml_declaration=True, encoding='UTF-8', standalone=True
         )
 
-    # Remonta o ZIP (mimetype deve ser primeiro e sem compressão)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
         if 'mimetype' in files:
@@ -407,7 +393,6 @@ def processar_doc_libreoffice(file_bytes, filename, mes_abrev, ano, pagamentos, 
     with open(doc_path, 'wb') as f:
         f.write(file_bytes)
 
-    # .doc → .docx
     result = subprocess.run(
         ['libreoffice', '--headless', '--convert-to', 'docx', '--outdir', tmp_dir, doc_path],
         capture_output=True, timeout=90
@@ -425,7 +410,6 @@ def processar_doc_libreoffice(file_bytes, filename, mes_abrev, ano, pagamentos, 
     processed_path = os.path.join(tmp_dir, 'saida.docx')
     doc.save(processed_path)
 
-    # .docx → .doc
     subprocess.run(
         ['libreoffice', '--headless', '--convert-to', 'doc', '--outdir', tmp_dir, processed_path],
         capture_output=True, timeout=90
@@ -435,7 +419,6 @@ def processar_doc_libreoffice(file_bytes, filename, mes_abrev, ano, pagamentos, 
         with open(out_doc, 'rb') as f:
             return f.read(), '.doc'
 
-    # Fallback: retorna como .docx
     with open(processed_path, 'rb') as f:
         return f.read(), '.docx'
 
@@ -513,8 +496,18 @@ if gerar and uploaded:
 
     # PASSO 2 — Pagamentos via API oficial
     status.info(f"🌐 Buscando pagamentos de {mes_selecionado}/{ano} no Portal da Transparência...")
-    pagamentos, api_status, api_erro = get_pagamentos(limpar_cnpj(cnpj), mes_num, ano)
+    pagamentos, api_status, api_erro, todos_brutos = get_pagamentos(limpar_cnpj(cnpj), mes_num, ano)
     progress.progress(65)
+
+    # Debug: mostra dados brutos da API
+    with st.expander("🔍 Debug — resposta bruta da API"):
+        st.write(f"**Status HTTP:** {api_status}")
+        st.write(f"**Total de registros retornados pela API (todos os meses):** {len(todos_brutos)}")
+        if api_erro:
+            st.write(f"**Erro:** {api_erro}")
+        if todos_brutos:
+            st.write("**Primeiros registros (raw):**")
+            st.json(todos_brutos[:5])
 
     if len(pagamentos) == 0:
         msg = f"⚠️ Nenhum pagamento encontrado para {mes_selecionado}/{ano}. O relatório será gerado com tabela vazia."
@@ -541,7 +534,6 @@ if gerar and uploaded:
         mime_type = 'application/vnd.oasis.opendocument.text'
 
     elif ext_entrada == '.doc':
-        # Tenta LibreOffice; se não disponível, orienta o usuário
         try:
             output_bytes, ext_saida = processar_doc_libreoffice(
                 file_bytes, uploaded.name, mes_abrev, ano, pagamentos, total_str
