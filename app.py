@@ -76,8 +76,8 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
     while True:
         params = {
             'codigoPessoa': cnpj_limpo,
-            'fase': 'PAG',
-            'ano': ano,
+            'fase': 3,
+            'ano': int(ano),
             'pagina': pagina,
         }
         try:
