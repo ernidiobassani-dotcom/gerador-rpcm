@@ -60,123 +60,57 @@ def limpar_cnpj(cnpj):
     return re.sub(r'[.\-/]', '', cnpj)
 
 def get_pagamentos(cnpj_limpo, mes_num, ano):
-    """Busca pagamentos no Portal da Transparência usando CNPJ diretamente."""
+    """Busca pagamentos via API oficial do Portal da Transparência."""
     ultimo_dia = calendar.monthrange(int(ano), mes_num)[1]
-    di_enc = f'01%2F{mes_num:02d}%2F{ano}'
-    df_enc = f'{ultimo_dia:02d}%2F{mes_num:02d}%2F{ano}'
-    di     = f'01/{mes_num:02d}/{ano}'
-    df     = f'{ultimo_dia:02d}/{mes_num:02d}/{ano}'
+    data_ini = f'01/{mes_num:02d}/{ano}'
+    data_fim = f'{ultimo_dia:02d}/{mes_num:02d}/{ano}'
 
-    base_params = (
-        f'paginacaoSimples=true&tamanhoPagina=100&offset=0&direcaoOrdenacao=asc'
-        f'&colunasSelecionadas=data%2CdocumentoResumido%2Cvalor%2Cfavorecido'
-        f'&de={di_enc}&ate={df_enc}'
-        f'&orgaos=UG167399&faseDespesa=3&ordenarPor=data&direcao=asc'
-    )
+    api_key = st.secrets.get("TRANSPARENCIA_API_KEY", "")
 
-    headers_json = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': f'https://portaldatransparencia.gov.br/despesas/favorecido?cnpjCpfFavorecido={cnpj_limpo}',
-    }
-    headers_html = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9',
+    headers = {
+        'chave-api-dados': api_key,
+        'Accept': 'application/json',
     }
 
-    # Variações de parâmetro para o CNPJ (o portal usa nomes diferentes em cada endpoint)
-    cnpj_variants = [
-        f'favorecido={cnpj_limpo}',
-        f'cnpjCpf={cnpj_limpo}',
-        f'cnpjCpfFavorecido={cnpj_limpo}',
-    ]
-
-    # 1. Tenta endpoints JSON com cada variação de parâmetro
-    for cnpj_param in cnpj_variants:
-        params = f'{base_params}&{cnpj_param}'
-        for endpoint_base in [
-            'https://portaldatransparencia.gov.br/despesas/favorecido/listar',
-            'https://portaldatransparencia.gov.br/api-de-dados/despesas/documentos',
-        ]:
-            try:
-                r = requests.get(f'{endpoint_base}?{params}', headers=headers_json, timeout=25)
-                if r.status_code == 200 and 'json' in r.headers.get('Content-Type', ''):
-                    resultado = parse_json(r.json())
-                    if resultado is not None:
-                        return resultado
-            except Exception:
-                continue
-
-    # 2. Fallback: HTML scraping
-    for cnpj_param in cnpj_variants:
-        url_html = f'https://portaldatransparencia.gov.br/despesas/favorecido?{base_params}&{cnpj_param}'
-        try:
-            r = requests.get(url_html, headers=headers_html, timeout=25)
-            if r.status_code == 200:
-                resultado = parse_html(r.text)
-                if resultado is not None and len(resultado) > 0:
-                    return resultado
-        except Exception:
-            continue
-
-    # Sem pagamentos encontrados (não é erro — pode ser mês sem pagamento)
-    return []
-
-def parse_json(data):
-    """Parseia resposta JSON do portal."""
-    items = data if isinstance(data, list) else data.get('data', data.get('resultado', []))
-    if not isinstance(items, list):
-        return None
     pagamentos = []
-    for item in items:
-        doc_num  = item.get('documentoResumido') or item.get('documento', '')
-        data_pgto = item.get('data', '')
-        valor_raw = item.get('valor', 0)
-        if isinstance(valor_raw, (int, float)):
-            valor_fmt = formatar_valor(valor_raw)
-            pagamentos.append((doc_num, data_pgto, valor_fmt, float(valor_raw)))
-        else:
-            # Tenta converter string
-            try:
-                v = float(str(valor_raw).replace('.','').replace(',','.'))
-                pagamentos.append((doc_num, data_pgto, f'R$ {valor_raw}', v))
-            except Exception:
-                pass
+    pagina = 1
+
+    while True:
+        params = {
+            'cnpjCpf': cnpj_limpo,
+            'dataInicial': data_ini,
+            'dataFinal': data_fim,
+            'codigoOrgao': '167399',
+            'pagina': pagina,
+        }
+        try:
+            r = requests.get(
+                'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido',
+                params=params,
+                headers=headers,
+                timeout=30,
+            )
+            if r.status_code != 200:
+                break
+            data = r.json()
+            if not isinstance(data, list) or len(data) == 0:
+                break
+            for item in data:
+                doc_num   = (item.get('documento') or {}).get('codigoResumido', '') or item.get('codigoDocumento', '')
+                data_pgto = item.get('dataDocumento', item.get('data', ''))
+                valor_raw = item.get('valorDocumento', item.get('valor', 0))
+                try:
+                    v = float(valor_raw)
+                    pagamentos.append((doc_num, data_pgto, formatar_valor(v), v))
+                except Exception:
+                    pass
+            if len(data) < 500:
+                break
+            pagina += 1
+        except Exception:
+            break
+
     return pagamentos
-
-def parse_html(html):
-    """Extrai pagamentos do HTML do portal."""
-    # Remove tags e normaliza
-    text = re.sub(r'<[^>]+>', ' ', html)
-    text = re.sub(r'\s+', ' ', text)
-
-    pagamentos = []
-
-    # Padrão: data + documento (OB ou DF) + valor no formato brasileiro
-    pattern = r'(\d{2}/\d{2}/\d{4})\s+(20\d{2}(?:OB|DF)\d+).*?R\$?\s*([\d]+\.[\d]{3},\d{2}|[\d]+,\d{2})'
-    matches = re.findall(pattern, text)
-
-    for data_pgto, doc_num, valor_str in matches:
-        try:
-            valor_num = float(valor_str.replace('.', '').replace(',', '.'))
-            pagamentos.append((doc_num, data_pgto, f'R$ {valor_str}', valor_num))
-        except Exception:
-            continue
-
-    # Fallback: tenta padrão sem R$
-    if not pagamentos:
-        pattern2 = r'(\d{2}/\d{2}/\d{4})\s+(20\d{2}(?:OB|DF)\d+)[^0-9]+([\d]+\.?[\d]*,\d{2})'
-        matches2 = re.findall(pattern2, text)
-        for data_pgto, doc_num, valor_str in matches2:
-            try:
-                valor_num = float(valor_str.replace('.', '').replace(',', '.'))
-                pagamentos.append((doc_num, data_pgto, f'R$ {valor_str}', valor_num))
-            except Exception:
-                continue
-
-    return pagamentos if pagamentos else []
 
 def formatar_valor(v):
     """Formata float para padrão brasileiro: R$ 1.234,56"""
@@ -195,7 +129,6 @@ def abrir_documento(file_bytes, filename):
     try:
         return Document(tmp.name)
     except ValueError:
-        # .dotx: corrigir content type
         dst = tmp.name.replace(ext, '.docx')
         shutil.copy2(tmp.name, dst)
         with zipfile.ZipFile(dst, 'r') as zin:
@@ -215,7 +148,6 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
     """Atualiza mês/ano no cabeçalho e substitui a tabela de pagamentos."""
     W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
-    # 1. Cabeçalho
     for para in doc.paragraphs:
         for run in para.runs:
             if re.search(r'\b(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\b', run.text):
@@ -225,16 +157,14 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
             if re.search(r'\b(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)/\d{4}\b', run.text):
                 run.text = re.sub(r'(?<=\/)\d{4}', ano, run.text)
 
-    # 2. Tabela de pagamentos
     for table in doc.tables:
         if 'DOCUMENTO' not in table.rows[0].cells[0].text:
             continue
 
         tbl = table._tbl
-        template_tr = copy.deepcopy(table.rows[1]._tr)   # linha modelo
-        total_tr    = table.rows[-1]._tr                  # linha TOTAL PAGO
+        template_tr = copy.deepcopy(table.rows[1]._tr)
+        total_tr    = table.rows[-1]._tr
 
-        # Remover linhas de dados existentes
         for row in list(table.rows[1:-1]):
             tbl.remove(row._tr)
 
@@ -256,11 +186,9 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
                     t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             return new_tr
 
-        # Inserir linhas (mesmo que vazio, não insere nada — tabela só com cabeçalho+total)
         for doc_num, data, valor, _ in pagamentos:
             total_tr.addprevious(make_row(doc_num, data, valor))
 
-        # Atualizar TOTAL PAGO
         merged_tc = total_tr.findall(qn('w:tc'))[1]
         for r in merged_tc.find(qn('w:p')).findall(qn('w:r')):
             t = r.find(qn('w:t'))
@@ -271,9 +199,7 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
     return doc
 
 def nome_saida(nome_entrada, mes_nome_arquivo):
-    """Deriva nome do arquivo de saída substituindo o mês."""
     base = os.path.splitext(nome_entrada)[0]
-    # Substituir qualquer nome de mês (em PT) no nome do arquivo
     meses_re = '|'.join([
         'JANEIRO','FEVEREIRO','MARCO','MARÇO','ABRIL','MAIO','JUNHO',
         'JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO',
@@ -312,8 +238,6 @@ gerar = st.button(
     disabled=(uploaded is None or not ano_input.isdigit())
 )
 
-# ─── Lógica principal ───────────────────────────────────────────────────────
-
 if gerar and uploaded:
     mes_num = MESES_LISTA.index(mes_selecionado) + 1
     mes_abrev, mes_nome_arq = MESES[mes_num]
@@ -323,7 +247,6 @@ if gerar and uploaded:
     status   = st.empty()
     file_bytes = uploaded.read()
 
-    # PASSO 1 — CNPJ
     status.info("🔍 Lendo documento e extraindo CNPJ...")
     cnpj = extrair_cnpj(file_bytes)
     progress.progress(15)
@@ -339,7 +262,6 @@ if gerar and uploaded:
 
     st.success(f"✅ CNPJ: **{cnpj}**")
 
-    # PASSO 2 — Pagamentos (usa CNPJ diretamente)
     status.info(f"🌐 Buscando pagamentos de {mes_selecionado}/{ano} no Portal da Transparência...")
     pagamentos = get_pagamentos(limpar_cnpj(cnpj), mes_num, ano)
     progress.progress(65)
@@ -351,7 +273,6 @@ if gerar and uploaded:
         total_str = calcular_total(pagamentos)
         st.info(f"📋 {len(pagamentos)} pagamento(s) | Total: **R$ {total_str}**")
 
-    # PASSO 4 — Gerar documento
     status.info("📝 Atualizando documento...")
     doc = abrir_documento(file_bytes, uploaded.name)
     doc = atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str)
@@ -373,7 +294,6 @@ if gerar and uploaded:
         type="primary"
     )
 
-    # Exibir resumo dos pagamentos
     if pagamentos:
         st.markdown("### Pagamentos incluídos:")
         import pandas as pd
