@@ -79,7 +79,7 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
 
     while True:
         params = {
-            'cnpjCpf': cnpj_limpo,
+            'codigoPessoa': cnpj_limpo,
             'dataInicial': data_ini,
             'dataFinal': data_fim,
             'pagina': pagina,
