@@ -61,10 +61,6 @@ def limpar_cnpj(cnpj):
 
 def get_pagamentos(cnpj_limpo, mes_num, ano):
     """Busca pagamentos via API oficial do Portal da Transparência."""
-    ultimo_dia = calendar.monthrange(int(ano), mes_num)[1]
-    data_ini = f'01/{mes_num:02d}/{ano}'
-    data_fim = f'{ultimo_dia:02d}/{mes_num:02d}/{ano}'
-
     api_key = st.secrets.get("TRANSPARENCIA_API_KEY", "")
 
     headers = {
@@ -72,7 +68,7 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
         'Accept': 'application/json',
     }
 
-    pagamentos = []
+    todos = []
     pagina = 1
     ultimo_status = None
     ultimo_erro = None
@@ -80,9 +76,8 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
     while True:
         params = {
             'codigoPessoa': cnpj_limpo,
-            'dataInicial': data_ini,
-            'dataFinal': data_fim,
             'fase': 'PAG',
+            'ano': ano,
             'pagina': pagina,
         }
         try:
@@ -99,21 +94,29 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
             data = r.json()
             if not isinstance(data, list) or len(data) == 0:
                 break
-            for item in data:
-                doc_num   = (item.get('documento') or {}).get('codigoResumido', '') or item.get('codigoDocumento', '')
-                data_pgto = item.get('dataDocumento', item.get('data', ''))
-                valor_raw = item.get('valorDocumento', item.get('valor', 0))
-                try:
-                    v = float(valor_raw)
-                    pagamentos.append((doc_num, data_pgto, formatar_valor(v), v))
-                except Exception:
-                    pass
+            todos.extend(data)
             if len(data) < 500:
                 break
             pagina += 1
         except Exception as e:
             ultimo_erro = str(e)
             break
+
+    # Filtra pelo mês e monta lista de pagamentos
+    pagamentos = []
+    mes_str = f'{mes_num:02d}'
+    for item in todos:
+        data_pgto = item.get('dataDocumento', item.get('data', ''))
+        # data_pgto pode ser "YYYY-MM-DD" ou "DD/MM/YYYY"
+        if mes_str not in str(data_pgto):
+            continue
+        doc_num   = (item.get('documento') or {}).get('codigoResumido', '') or item.get('codigoDocumento', '')
+        valor_raw = item.get('valorDocumento', item.get('valor', 0))
+        try:
+            v = float(valor_raw)
+            pagamentos.append((doc_num, data_pgto, formatar_valor(v), v))
+        except Exception:
+            pass
 
     return pagamentos, ultimo_status, ultimo_erro
 
