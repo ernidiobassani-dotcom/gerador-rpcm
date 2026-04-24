@@ -74,13 +74,14 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
 
     pagamentos = []
     pagina = 1
+    ultimo_status = None
+    ultimo_erro = None
 
     while True:
         params = {
             'cnpjCpf': cnpj_limpo,
             'dataInicial': data_ini,
             'dataFinal': data_fim,
-            'codigoOrgao': '167399',
             'pagina': pagina,
         }
         try:
@@ -90,7 +91,9 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
                 headers=headers,
                 timeout=30,
             )
+            ultimo_status = r.status_code
             if r.status_code != 200:
+                ultimo_erro = r.text[:300]
                 break
             data = r.json()
             if not isinstance(data, list) or len(data) == 0:
@@ -107,10 +110,11 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
             if len(data) < 500:
                 break
             pagina += 1
-        except Exception:
+        except Exception as e:
+            ultimo_erro = str(e)
             break
 
-    return pagamentos
+    return pagamentos, ultimo_status, ultimo_erro
 
 def formatar_valor(v):
     """Formata float para padrão brasileiro: R$ 1.234,56"""
@@ -129,6 +133,7 @@ def abrir_documento(file_bytes, filename):
     try:
         return Document(tmp.name)
     except ValueError:
+        # .dotx: corrigir content type
         dst = tmp.name.replace(ext, '.docx')
         shutil.copy2(tmp.name, dst)
         with zipfile.ZipFile(dst, 'r') as zin:
@@ -148,6 +153,7 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
     """Atualiza mês/ano no cabeçalho e substitui a tabela de pagamentos."""
     W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
+    # 1. Cabeçalho
     for para in doc.paragraphs:
         for run in para.runs:
             if re.search(r'\b(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\b', run.text):
@@ -157,6 +163,7 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
             if re.search(r'\b(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)/\d{4}\b', run.text):
                 run.text = re.sub(r'(?<=\/)\d{4}', ano, run.text)
 
+    # 2. Tabela de pagamentos
     for table in doc.tables:
         if 'DOCUMENTO' not in table.rows[0].cells[0].text:
             continue
@@ -193,12 +200,13 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
         for r in merged_tc.find(qn('w:p')).findall(qn('w:r')):
             t = r.find(qn('w:t'))
             if t is not None:
-                t.text = f'R$ {total_str}'
+                t.text = f"R$ {total_str}"
         break
 
     return doc
 
 def nome_saida(nome_entrada, mes_nome_arquivo):
+    """Deriva nome do arquivo de saída substituindo o mês."""
     base = os.path.splitext(nome_entrada)[0]
     meses_re = '|'.join([
         'JANEIRO','FEVEREIRO','MARCO','MARÇO','ABRIL','MAIO','JUNHO',
@@ -238,6 +246,8 @@ gerar = st.button(
     disabled=(uploaded is None or not ano_input.isdigit())
 )
 
+# ─── Lógica principal ───────────────────────────────────────────────────────
+
 if gerar and uploaded:
     mes_num = MESES_LISTA.index(mes_selecionado) + 1
     mes_abrev, mes_nome_arq = MESES[mes_num]
@@ -247,6 +257,7 @@ if gerar and uploaded:
     status   = st.empty()
     file_bytes = uploaded.read()
 
+    # PASSO 1 — CNPJ
     status.info("🔍 Lendo documento e extraindo CNPJ...")
     cnpj = extrair_cnpj(file_bytes)
     progress.progress(15)
@@ -262,17 +273,26 @@ if gerar and uploaded:
 
     st.success(f"✅ CNPJ: **{cnpj}**")
 
+    # PASSO 2 — Pagamentos via API oficial
     status.info(f"🌐 Buscando pagamentos de {mes_selecionado}/{ano} no Portal da Transparência...")
-    pagamentos = get_pagamentos(limpar_cnpj(cnpj), mes_num, ano)
+    pagamentos, api_status, api_erro = get_pagamentos(limpar_cnpj(cnpj), mes_num, ano)
     progress.progress(65)
 
     if len(pagamentos) == 0:
-        st.warning(f"⚠️ Nenhum pagamento encontrado para {mes_selecionado}/{ano}. O relatório será gerado com tabela vazia.")
+        msg = f"⚠️ Nenhum pagamento encontrado para {mes_selecionado}/{ano}. O relatório será gerado com tabela vazia."
+        if api_status and api_status != 200:
+            msg += f"\n\n🔍 **Debug:** API retornou status **{api_status}**."
+            if api_erro:
+                msg += f" Resposta: `{api_erro}`"
+        elif api_status is None:
+            msg += "\n\n🔍 **Debug:** Não foi possível conectar à API (timeout ou erro de rede)."
+        st.warning(msg)
         total_str = "0,00"
     else:
         total_str = calcular_total(pagamentos)
         st.info(f"📋 {len(pagamentos)} pagamento(s) | Total: **R$ {total_str}**")
 
+    # PASSO 3 — Gerar documento
     status.info("📝 Atualizando documento...")
     doc = abrir_documento(file_bytes, uploaded.name)
     doc = atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str)
