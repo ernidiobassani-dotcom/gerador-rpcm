@@ -102,21 +102,32 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
             ultimo_erro = str(e)
             break
 
+    # Debug: mostra primeiros itens da API antes de filtrar
+    import json as _json
+    if todos:
+        with st.expander(f"🔍 Debug API: {len(todos)} item(ns) retornado(s) no ano"):
+            st.code(_json.dumps(todos[:3], ensure_ascii=False, indent=2))
+    else:
+        st.warning(f"⚠️ Debug: API retornou 0 itens. Status={ultimo_status}. Erro={ultimo_erro}")
+
     # Filtra pelo mês e monta lista de pagamentos
     pagamentos = []
     mes_str = f'{mes_num:02d}'
-    _debug_shown = False
     for item in todos:
         data_pgto = item.get('dataDocumento', item.get('data', ''))
-        # data_pgto pode ser "YYYY-MM-DD" ou "DD/MM/YYYY"
-        if mes_str not in str(data_pgto):
+        data_str  = str(data_pgto)
+        # Verifica se o mês aparece na posição correta
+        # Formato ISO: YYYY-MM-DD → posição 5:7
+        # Formato BR:  DD/MM/YYYY → posição 3:5
+        mes_ok = False
+        if len(data_str) >= 7 and data_str[4:5] == '-' and data_str[5:7] == mes_str:
+            mes_ok = True  # ISO: YYYY-MM-DD
+        elif len(data_str) >= 5 and data_str[2:3] == '/' and data_str[3:5] == mes_str:
+            mes_ok = True  # BR: DD/MM/YYYY
+        elif mes_str in data_str:
+            mes_ok = True  # fallback genérico
+        if not mes_ok:
             continue
-        if not _debug_shown:
-            _debug_shown = True
-            import json as _json
-            st.expander("🔍 Debug: estrutura do primeiro item da API").write(
-                _json.dumps(item, ensure_ascii=False, indent=2)
-            )
         doc_obj   = item.get('documento')
         if isinstance(doc_obj, dict):
             doc_num = doc_obj.get('codigoResumido', '') or doc_obj.get('codigo', '') or str(doc_obj)
