@@ -105,12 +105,23 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
     # Filtra pelo mês e monta lista de pagamentos
     pagamentos = []
     mes_str = f'{mes_num:02d}'
+    _debug_shown = False
     for item in todos:
         data_pgto = item.get('dataDocumento', item.get('data', ''))
         # data_pgto pode ser "YYYY-MM-DD" ou "DD/MM/YYYY"
         if mes_str not in str(data_pgto):
             continue
-        doc_num   = (item.get('documento') or {}).get('codigoResumido', '') or item.get('codigoDocumento', '')
+        if not _debug_shown:
+            _debug_shown = True
+            import json as _json
+            st.expander("🔍 Debug: estrutura do primeiro item da API").write(
+                _json.dumps(item, ensure_ascii=False, indent=2)
+            )
+        doc_obj   = item.get('documento')
+        if isinstance(doc_obj, dict):
+            doc_num = doc_obj.get('codigoResumido', '') or doc_obj.get('codigo', '') or str(doc_obj)
+        else:
+            doc_num = str(doc_obj or '') or item.get('codigoDocumento', '')
         valor_raw = item.get('valorDocumento', item.get('valor', 0))
         try:
             v = float(valor_raw)
@@ -204,7 +215,7 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
         for r in merged_tc.find(qn('w:p')).findall(qn('w:r')):
             t = r.find(qn('w:t'))
             if t is not None:
-                t.text = f"R$ {total_str}"
+                t.text = f'R$ {total_str}'
         break
 
     return doc
