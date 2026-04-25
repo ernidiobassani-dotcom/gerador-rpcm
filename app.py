@@ -48,9 +48,13 @@ NS_TABLE = 'urn:oasis:names:tc:opendocument:xmlns:table:1.0'
 
 # ─── Funções de extração de CNPJ ────────────────────────────────────────────
 
+CNPJ_REGEX = re.compile(r'\d{2}\.\d{3}\.\d{3}\/\d{4}\s*-\s*\d{2}')
+
+def _normalizar_cnpj(valor):
+    return re.sub(r'\s+', '', valor)
+
 def extrair_cnpj_zip(file_bytes):
     """Extrai CNPJ varrendo todos os XMLs de um arquivo ZIP (docx, dotx, odt)."""
-    padrao = re.compile(r'\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}')
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
             for nome in z.namelist():
@@ -60,9 +64,9 @@ def extrair_cnpj_zip(file_bytes):
                     conteudo = z.read(nome).decode('utf-8', errors='ignore')
                     texto = re.sub(r'<[^>]+>', ' ', conteudo)
                     texto = re.sub(r'\s+', ' ', texto)
-                    match = padrao.search(texto)
+                    match = CNPJ_REGEX.search(texto)
                     if match:
-                        return match.group()
+                        return _normalizar_cnpj(match.group())
                 except Exception:
                     continue
     except Exception:
@@ -71,21 +75,20 @@ def extrair_cnpj_zip(file_bytes):
 
 def extrair_cnpj_doc(file_bytes):
     """Extrai CNPJ de arquivo .doc (binário legacy) buscando no conteúdo."""
-    padrao = re.compile(r'\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}')
     # Word .doc armazena texto internamente em UTF-16-LE
     try:
         texto = file_bytes.decode('utf-16-le', errors='ignore')
-        match = padrao.search(texto)
+        match = CNPJ_REGEX.search(texto)
         if match:
-            return match.group()
+            return _normalizar_cnpj(match.group())
     except Exception:
         pass
     # Fallback: latin-1
     try:
         texto = file_bytes.decode('latin-1', errors='ignore')
-        match = padrao.search(texto)
+        match = CNPJ_REGEX.search(texto)
         if match:
-            return match.group()
+            return _normalizar_cnpj(match.group())
     except Exception:
         pass
     # Fallback: strings via subprocess
@@ -94,9 +97,9 @@ def extrair_cnpj_doc(file_bytes):
         tmp.write(file_bytes)
         tmp.close()
         result = subprocess.run(['strings', tmp.name], capture_output=True, text=True, timeout=10)
-        match = padrao.search(result.stdout)
+        match = CNPJ_REGEX.search(result.stdout)
         if match:
-            return match.group()
+            return _normalizar_cnpj(match.group())
     except Exception:
         pass
     return None
