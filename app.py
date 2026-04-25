@@ -153,11 +153,28 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
                 v = float(valor_raw.replace('.', '').replace(',', '.'))
             else:
                 v = float(valor_raw)
-            pagamentos.append((doc_num, data_pgto, formatar_valor(v), v))
+            pagamentos.append((doc_num, _normalizar_data_br(data_pgto), formatar_valor(v), v))
         except Exception:
             pass
 
+    # Ordena por data (cronológica) e depois por documento — saída estável e legível
+    pagamentos.sort(key=lambda p: (_chave_data(p[1]), p[0]))
+
     return pagamentos, ultimo_status, ultimo_erro, todos
+
+def _normalizar_data_br(data_str):
+    """Normaliza data para DD/MM/YYYY (aceita ISO YYYY-MM-DD ou já BR)."""
+    s = str(data_str).strip()
+    if len(s) >= 10 and s[4:5] == '-':
+        return f'{s[8:10]}/{s[5:7]}/{s[0:4]}'
+    return s[:10] if len(s) >= 10 else s
+
+def _chave_data(data_br):
+    """Converte DD/MM/YYYY em chave ordenável (YYYYMMDD)."""
+    s = str(data_br)
+    if len(s) >= 10 and s[2:3] == '/' and s[5:6] == '/':
+        return s[6:10] + s[3:5] + s[0:2]
+    return s
 
 def formatar_valor(v):
     """Formata float para padrão brasileiro: R$ 1.234,56"""
@@ -214,11 +231,27 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
             continue
 
         tbl = table._tbl
-        template_tr = copy.deepcopy(table.rows[1]._tr)
-        total_tr    = table.rows[-1]._tr
+        all_rows = list(table.rows)
 
-        for row in list(table.rows[1:-1]):
-            tbl.remove(row._tr)
+        # Detecta linha de TOTAL pelo conteúdo da primeira célula
+        total_tr = None
+        for row in all_rows[1:]:
+            if 'TOTAL' in row.cells[0].text.upper():
+                total_tr = row._tr
+                break
+
+        # Coleta as linhas de dados (tudo exceto cabeçalho e total)
+        data_trs = [row._tr for row in all_rows[1:] if row._tr is not total_tr]
+
+        # Usa a 1ª linha de dados como TEMPLATE de estilo; sem ela, cai no header
+        if data_trs:
+            template_tr = copy.deepcopy(data_trs[0])
+        else:
+            template_tr = copy.deepcopy(all_rows[0]._tr)
+
+        # Remove todas as linhas de dados existentes (incluindo a de exemplo)
+        for tr in data_trs:
+            tbl.remove(tr)
 
         def make_row(doc_num, data, valor):
             new_tr = copy.deepcopy(template_tr)
@@ -238,14 +271,34 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
                     t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             return new_tr
 
-        for doc_num, data, valor, _ in pagamentos:
-            total_tr.addprevious(make_row(doc_num, data, valor))
-
-        merged_tc = total_tr.findall(qn('w:tc'))[1]
-        for r in merged_tc.find(qn('w:p')).findall(qn('w:r')):
-            t = r.find(qn('w:t'))
-            if t is not None:
-                t.text = f'R$ {total_str}'
+        if total_tr is not None:
+            for doc_num, data, valor, _ in pagamentos:
+                total_tr.addprevious(make_row(doc_num, data, valor))
+            # Total vai sempre na ÚLTIMA célula da linha de total
+            tcs = total_tr.findall(qn('w:tc'))
+            if tcs:
+                target_tc = tcs[-1]
+                para = target_tc.find(qn('w:p'))
+                if para is not None:
+                    runs = para.findall(qn('w:r'))
+                    if runs:
+                        # Atualiza o último run com o texto e zera os demais
+                        for r in runs[:-1]:
+                            t = r.find(qn('w:t'))
+                            if t is not None:
+                                t.text = ''
+                        last_t = runs[-1].find(qn('w:t'))
+                        if last_t is None:
+                            last_t = etree.SubElement(runs[-1], f'{{{W}}}t')
+                        last_t.text = f'R$ {total_str}'
+                    else:
+                        new_r = etree.SubElement(para, f'{{{W}}}r')
+                        t = etree.SubElement(new_r, f'{{{W}}}t')
+                        t.text = f'R$ {total_str}'
+        else:
+            # Sem linha de TOTAL no template — apenas anexa pagamentos
+            for doc_num, data, valor, _ in pagamentos:
+                tbl.append(make_row(doc_num, data, valor))
         break
 
     return doc
@@ -263,17 +316,34 @@ def _odt_cell_text(cell):
     return ''.join(partes).strip()
 
 def _odt_set_cell_text(cell, texto):
-    """Define texto de uma célula ODT, preservando atributos de estilo da célula."""
+    """Define texto de uma célula ODT preservando o estilo de parágrafo
+    (text:style-name no <text:p>) e o estilo de texto (<text:span>) que
+    estiverem na célula. Sem isso, a linha inserida sai com formatação
+    diferente do modelo."""
     NS_T = f'{{{NS_TEXT}}}'
-    # Encontra o primeiro parágrafo existente (para preservar estilo de parágrafo)
     paragrafos = cell.findall(f'{NS_T}p')
     if paragrafos:
         p = paragrafos[0]
-        # Limpa conteúdo interno do parágrafo
-        for child in list(p):
-            p.remove(child)
-        p.text = texto
-        # Remove parágrafos extras
+        # Tenta reaproveitar um <text:span> existente (mantém estilo de texto)
+        spans = p.findall(f'{NS_T}span')
+        if spans:
+            span = spans[0]
+            # Limpa filhos e tail do span, mantém atributos (estilo)
+            for child in list(span):
+                span.remove(child)
+            span.text = texto
+            span.tail = None
+            # Remove qualquer conteúdo solto no parágrafo (texto direto, outros spans)
+            p.text = None
+            for child in list(p):
+                if child is not span:
+                    p.remove(child)
+        else:
+            # Sem span — define texto direto no parágrafo, mantém estilo do <text:p>
+            for child in list(p):
+                p.remove(child)
+            p.text = texto
+        # Remove parágrafos extras (se houver)
         for extra in paragrafos[1:]:
             cell.remove(extra)
     else:
@@ -314,37 +384,57 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
         rows = table.findall(f'{NS_TB}table-row')
         if len(rows) < 2:
             continue
-        # Checa se o cabeçalho tem "DOCUMENTO"
         header_cells = rows[0].findall(f'{NS_TB}table-cell')
         if not header_cells:
             continue
         if 'DOCUMENTO' not in _odt_cell_text(header_cells[0]).upper():
             continue
 
-        # Encontrou a tabela correta
-        template_row = rows[1]   # segunda linha = template de dados
-        total_row    = rows[-1]  # última linha  = total
+        # Detecta linha de TOTAL: primeira célula contém "TOTAL"
+        total_row = None
+        for r in rows[1:]:
+            cells = r.findall(f'{NS_TB}table-cell')
+            if cells and 'TOTAL' in _odt_cell_text(cells[0]).upper():
+                total_row = r
+                break
 
-        # Remove linhas de dados (entre header e total)
-        for row in rows[1:-1]:
-            table.remove(row)
+        # Coleta linhas de dados (todas exceto cabeçalho e total)
+        data_rows = [r for r in rows[1:] if r is not total_row]
 
-        # Insere linhas de pagamento antes da linha de total
-        for doc_num, data, valor, _ in pagamentos:
+        # Define um "template de linha" — preferimos a 1ª linha de dados existente
+        # (preserva estilos de célula e <text:span> do modelo do usuário).
+        if data_rows:
+            template_row = copy.deepcopy(data_rows[0])
+        else:
+            # Sem linha de exemplo no template: usa o cabeçalho como base estrutural
+            template_row = copy.deepcopy(rows[0])
+
+        # Remove TODAS as linhas de dados existentes (incluindo a de exemplo)
+        for r in data_rows:
+            table.remove(r)
+
+        def _make_row(doc_num, data, valor):
             new_row = copy.deepcopy(template_row)
             cells = new_row.findall(f'{NS_TB}table-cell')
             if len(cells) >= 3:
                 _odt_set_cell_text(cells[0], str(doc_num))
                 _odt_set_cell_text(cells[1], str(data))
                 _odt_set_cell_text(cells[2], str(valor))
-            total_row.addprevious(new_row)
+            return new_row
 
-        # Atualiza valor total
-        total_cells = total_row.findall(f'{NS_TB}table-cell')
-        if len(total_cells) >= 2:
-            _odt_set_cell_text(total_cells[1], f'R$ {total_str}')
-        elif len(total_cells) == 1:
-            _odt_set_cell_text(total_cells[0], f'R$ {total_str}')
+        # Insere as novas linhas de pagamento
+        if total_row is not None:
+            for doc_num, data, valor, _ in pagamentos:
+                total_row.addprevious(_make_row(doc_num, data, valor))
+            # Atualiza valor total — sempre na ÚLTIMA célula do total_row
+            # (em modelos com merge é a célula 2; em modelos sem merge é a 3).
+            total_cells = total_row.findall(f'{NS_TB}table-cell')
+            if total_cells:
+                _odt_set_cell_text(total_cells[-1], f'R$ {total_str}')
+        else:
+            # Modelo sem linha de TOTAL — apenas anexa as linhas de pagamento
+            for doc_num, data, valor, _ in pagamentos:
+                table.append(_make_row(doc_num, data, valor))
         break
 
     files['content.xml'] = etree.tostring(
