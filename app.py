@@ -9,6 +9,7 @@ import calendar
 import tempfile
 import os
 import subprocess
+from datetime import date
 from lxml import etree
 from docx import Document
 from docx.oxml.ns import qn
@@ -457,16 +458,19 @@ uploaded = st.file_uploader(
     type=["docx", "dotx", "odt", "doc"]
 )
 
+ano_atual = date.today().year
+anos_disponiveis = list(range(ano_atual, ano_atual - 7, -1))
+
 col1, col2 = st.columns(2)
 with col1:
     mes_selecionado = st.selectbox("Mês de referência", MESES_LISTA)
 with col2:
-    ano_input = st.text_input("Ano", value="2025", max_chars=4)
+    ano_selecionado = st.selectbox("Ano", anos_disponiveis)
 
 gerar = st.button(
     "📄 Gerar Relatório",
     type="primary",
-    disabled=(uploaded is None or not ano_input.isdigit())
+    disabled=(uploaded is None)
 )
 
 # ─── Lógica principal ───────────────────────────────────────────────────────
@@ -474,7 +478,7 @@ gerar = st.button(
 if gerar and uploaded:
     mes_num = MESES_LISTA.index(mes_selecionado) + 1
     mes_abrev, mes_nome_arq = MESES[mes_num]
-    ano = ano_input.strip()
+    ano = str(ano_selecionado)
     ext_entrada = os.path.splitext(uploaded.name)[1].lower()
 
     progress = st.progress(0)
