@@ -528,18 +528,41 @@ with col2:
     ano_selecionado = st.selectbox("Ano", anos_disponiveis)
     ano_input = str(ano_selecionado)
 
-gerar = st.button(
-    "📄 Gerar Relatório",
-    type="primary",
-    disabled=(uploaded is None)
-)
+# Cálculo do mês anterior à data atual (rola pra dezembro/ano-1 em janeiro)
+hoje = date.today()
+if hoje.month == 1:
+    mes_anterior_num, ano_anterior_num = 12, hoje.year - 1
+else:
+    mes_anterior_num, ano_anterior_num = hoje.month - 1, hoje.year
+label_mes_anterior = MESES_LISTA[mes_anterior_num - 1]
+
+botao_col1, botao_col2 = st.columns(2)
+with botao_col1:
+    gerar = st.button(
+        "📄 Gerar Relatório",
+        type="primary",
+        disabled=(uploaded is None),
+        use_container_width=True,
+    )
+with botao_col2:
+    gerar_mes_anterior = st.button(
+        f"⚡ Gerar — {label_mes_anterior}/{ano_anterior_num}",
+        disabled=(uploaded is None),
+        use_container_width=True,
+        help="Atalho: gera o relatório referente ao mês anterior à data de hoje.",
+    )
 
 # ─── Lógica principal ───────────────────────────────────────────────────────
 
-if gerar and uploaded:
-    mes_num = MESES_LISTA.index(mes_selecionado) + 1
+if (gerar or gerar_mes_anterior) and uploaded:
+    if gerar_mes_anterior:
+        mes_num = mes_anterior_num
+        ano = str(ano_anterior_num)
+        mes_selecionado = label_mes_anterior
+    else:
+        mes_num = MESES_LISTA.index(mes_selecionado) + 1
+        ano = ano_input.strip()
     mes_abrev, mes_nome_arq = MESES[mes_num]
-    ano = ano_input.strip()
     ext_entrada = os.path.splitext(uploaded.name)[1].lower()
 
     progress = st.progress(0)
