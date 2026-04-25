@@ -47,7 +47,7 @@ MESES_LISTA = [
 NS_TEXT  = 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'
 NS_TABLE = 'urn:oasis:names:tc:opendocument:xmlns:table:1.0'
 
-# ─── Funções de extração de CNPJ ────────────────────────────────────────────
+# ─── Funções de CNPJ ────────────────────────────────────────────────────────
 
 def _formatar_cnpj(digits):
     """Formata 14 dígitos no padrão XX.XXX.XXX/XXXX-XX."""
@@ -56,96 +56,26 @@ def _formatar_cnpj(digits):
         return f'{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}'
     return None
 
-def extrair_cnpj_zip(file_bytes):
-    """Extrai CNPJ varrendo todos os XMLs de um arquivo ZIP (docx, dotx, odt).
-    Aceita 4 variantes:
-      1. Formatado normal:   22.416.260/0001-85
-      2. Com espaços:        22.416.260/0001 - 85
-      3. Só dígitos:         22416260000185
-      4. Runs separados:     dígitos sem separador no XML compactado
-    """
-    # Padrão 1 e 2: com pontuação (espaços opcionais ao redor de / e -)
-    padrao_fmt = re.compile(r'\d{2}\.\d{3}\.\d{3}\s*[/]\s*\d{4}\s*[-]\s*\d{2}')
-    # Padrão 3: 14 dígitos seguidos (CNPJ sem formatação)
-    padrao_raw = re.compile(r'(?<!\d)(\d{14})(?!\d)')
-    try:
-        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
-            for nome in z.namelist():
-                if not nome.endswith('.xml'):
-                    continue
-                try:
-                    conteudo = z.read(nome).decode('utf-8', errors='ignore')
-                    # Tentativa 1: texto com espaços (remove só as tags)
-                    texto = re.sub(r'<[^>]+>', ' ', conteudo)
-                    texto = re.sub(r'\s+', ' ', texto)
-                    match = padrao_fmt.search(texto)
-                    if match:
-                        return re.sub(r'\s', '', match.group())
-                    # Tentativa 2: texto compactado (sem nenhum espaço)
-                    texto_compact = re.sub(r'<[^>]+>', '', conteudo)
-                    texto_compact = re.sub(r'\s', '', texto_compact)
-                    match2 = padrao_fmt.search(texto_compact)
-                    if match2:
-                        return re.sub(r'\s', '', match2.group())
-                    # Tentativa 3: 14 dígitos após a palavra "CNPJ" (case-insensitive)
-                    m3 = re.search(r'cnpj\s*[:\-]?\s*(\d{14})', texto, re.IGNORECASE)
-                    if m3:
-                        cnpj = _formatar_cnpj(m3.group(1))
-                        if cnpj:
-                            return cnpj
-                    # Tentativa 4: qualquer sequência de 14 dígitos no texto compactado
-                    for m in padrao_raw.finditer(texto_compact):
-                        cnpj = _formatar_cnpj(m.group())
-                        if cnpj:
-                            return cnpj
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return None
-
-def extrair_cnpj_doc(file_bytes):
-    """Extrai CNPJ de arquivo .doc (binário legacy) buscando no conteúdo."""
-    padrao = re.compile(r'\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}')
-    # Word .doc armazena texto internamente em UTF-16-LE
-    try:
-        texto = file_bytes.decode('utf-16-le', errors='ignore')
-        match = padrao.search(texto)
-        if match:
-            return match.group()
-    except Exception:
-        pass
-    # Fallback: latin-1
-    try:
-        texto = file_bytes.decode('latin-1', errors='ignore')
-        match = padrao.search(texto)
-        if match:
-            return match.group()
-    except Exception:
-        pass
-    # Fallback: strings via subprocess
-    try:
-        tmp = tempfile.NamedTemporaryFile(suffix='.doc', delete=False)
-        tmp.write(file_bytes)
-        tmp.close()
-        result = subprocess.run(['strings', tmp.name], capture_output=True, text=True, timeout=10)
-        match = padrao.search(result.stdout)
-        if match:
-            return match.group()
-    except Exception:
-        pass
-    return None
-
-def extrair_cnpj(file_bytes, ext='.docx'):
-    """Extrai CNPJ do documento de acordo com o formato."""
-    if ext in ('.docx', '.dotx', '.odt'):
-        return extrair_cnpj_zip(file_bytes)
-    elif ext == '.doc':
-        return extrair_cnpj_doc(file_bytes)
-    return None
-
 def limpar_cnpj(cnpj):
     return re.sub(r'[.\-/]', '', cnpj)
+
+def consultar_empresa(cnpj_limpo):
+    """Consulta razão social na BrasilAPI. Retorna dict com dados ou None."""
+    try:
+        r = requests.get(
+            f'https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}',
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return {
+                'razao_social': data.get('razao_social', '') or '',
+                'nome_fantasia': data.get('nome_fantasia', '') or '',
+                'situacao': data.get('descricao_situacao_cadastral', '') or '',
+            }
+    except Exception:
+        pass
+    return None
 
 # ─── API Portal da Transparência ────────────────────────────────────────────
 
@@ -503,9 +433,13 @@ def nome_saida(nome_entrada, mes_nome_arquivo, ext_saida=None):
 
 # ─── Interface ──────────────────────────────────────────────────────────────
 
+if 'cnpj_confirmado' not in st.session_state:
+    st.session_state.cnpj_confirmado = None
+if 'empresa_info' not in st.session_state:
+    st.session_state.empresa_info = None
+
 st.info(
-    "📌 O programa tenta extrair o **CNPJ da empresa** automaticamente do documento. "
-    "Caso não encontre, você pode digitá-lo manualmente no campo abaixo."
+    "📌 Digite o **CNPJ da empresa**, busque a razão social e confirme antes de gerar o relatório."
 )
 
 uploaded = st.file_uploader(
@@ -513,11 +447,60 @@ uploaded = st.file_uploader(
     type=["docx", "dotx", "odt", "doc"]
 )
 
-cnpj_manual = st.text_input(
-    "CNPJ da empresa (opcional — preencha se o app não encontrar automaticamente)",
-    placeholder="Ex: 22.416.260/0001-85",
+cnpj_input = st.text_input(
+    "CNPJ da empresa",
+    placeholder="22.416.260/0001-85 ou apenas os 14 dígitos",
     max_chars=18,
 )
+
+cnpj_formatado_atual = _formatar_cnpj(cnpj_input) if cnpj_input.strip() else None
+
+# Se o usuário alterou o CNPJ após confirmar, reseta a confirmação
+if st.session_state.cnpj_confirmado and st.session_state.cnpj_confirmado != cnpj_formatado_atual:
+    st.session_state.cnpj_confirmado = None
+    st.session_state.empresa_info = None
+
+buscar = st.button(
+    "🔍 Buscar empresa",
+    disabled=(cnpj_formatado_atual is None),
+)
+
+if buscar and cnpj_formatado_atual:
+    with st.spinner("Consultando BrasilAPI..."):
+        info = consultar_empresa(limpar_cnpj(cnpj_formatado_atual))
+    if info:
+        st.session_state.empresa_info = info
+    else:
+        st.session_state.empresa_info = None
+        st.error(
+            "❌ Não foi possível consultar essa empresa. "
+            "Verifique o CNPJ ou tente novamente em alguns segundos."
+        )
+
+# Empresa encontrada e ainda não confirmada → mostra dados + botão Confirmar
+if (
+    st.session_state.empresa_info
+    and st.session_state.cnpj_confirmado != cnpj_formatado_atual
+):
+    info = st.session_state.empresa_info
+    nome_fantasia = info.get('nome_fantasia', '').strip()
+    extra = ''
+    if nome_fantasia and nome_fantasia.lower() != info['razao_social'].strip().lower():
+        extra = f"  \n**Nome fantasia:** {nome_fantasia}"
+    st.markdown(
+        f"**Empresa encontrada:** {info['razao_social']}{extra}  \n"
+        f"**Situação cadastral:** {info['situacao']}"
+    )
+    if st.button("✅ Confirmar e usar este CNPJ", type="primary"):
+        st.session_state.cnpj_confirmado = cnpj_formatado_atual
+
+# CNPJ confirmado → mensagem persistente
+if st.session_state.cnpj_confirmado:
+    info = st.session_state.empresa_info or {}
+    st.success(
+        f"✅ CNPJ confirmado: **{st.session_state.cnpj_confirmado}** — "
+        f"{info.get('razao_social', '')}"
+    )
 
 col1, col2 = st.columns(2)
 with col1:
@@ -536,25 +519,27 @@ else:
     mes_anterior_num, ano_anterior_num = hoje.month - 1, hoje.year
 label_mes_anterior = MESES_LISTA[mes_anterior_num - 1]
 
+botoes_disabled = (uploaded is None) or (st.session_state.cnpj_confirmado is None)
+
 botao_col1, botao_col2 = st.columns(2)
 with botao_col1:
     gerar = st.button(
         "📄 Gerar Relatório",
         type="primary",
-        disabled=(uploaded is None),
+        disabled=botoes_disabled,
         use_container_width=True,
     )
 with botao_col2:
     gerar_mes_anterior = st.button(
         f"⚡ Gerar — {label_mes_anterior}/{ano_anterior_num}",
-        disabled=(uploaded is None),
+        disabled=botoes_disabled,
         use_container_width=True,
         help="Atalho: gera o relatório referente ao mês anterior à data de hoje.",
     )
 
 # ─── Lógica principal ───────────────────────────────────────────────────────
 
-if (gerar or gerar_mes_anterior) and uploaded:
+if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirmado:
     if gerar_mes_anterior:
         mes_num = mes_anterior_num
         ano = str(ano_anterior_num)
@@ -569,33 +554,9 @@ if (gerar or gerar_mes_anterior) and uploaded:
     status   = st.empty()
     file_bytes = uploaded.read()
 
-    # PASSO 1 — CNPJ
-    # Tenta extrair do documento primeiro; manual só entra como fallback
-    status.info("🔍 Lendo documento e extraindo CNPJ...")
-    cnpj = extrair_cnpj(file_bytes, ext_entrada)
-    origem_cnpj = "documento"
-
-    if not cnpj and cnpj_manual.strip():
-        cnpj = _formatar_cnpj(cnpj_manual)
-        if not cnpj:
-            st.error(
-                "❌ **CNPJ manual em formato inválido.**\n\n"
-                "Use o formato `XX.XXX.XXX/XXXX-XX` ou apenas os 14 dígitos."
-            )
-            st.stop()
-        origem_cnpj = "campo manual"
-
+    # PASSO 1 — CNPJ (já confirmado pelo usuário)
+    cnpj = st.session_state.cnpj_confirmado
     progress.progress(15)
-
-    if not cnpj:
-        st.error(
-            "❌ **CNPJ não encontrado no documento.**\n\n"
-            "O programa não conseguiu localizar o CNPJ automaticamente. "
-            "Digite o CNPJ manualmente no campo acima (formato `XX.XXX.XXX/XXXX-XX`) e tente novamente."
-        )
-        st.stop()
-
-    st.success(f"✅ CNPJ: **{cnpj}** _(via {origem_cnpj})_")
 
     # PASSO 2 — Pagamentos via API oficial
     status.info(f"🌐 Buscando pagamentos de {mes_selecionado}/{ano} no Portal da Transparência...")
