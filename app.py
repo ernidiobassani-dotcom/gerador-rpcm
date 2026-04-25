@@ -547,13 +547,20 @@ if gerar and uploaded:
     file_bytes = uploaded.read()
 
     # PASSO 1 — CNPJ
-    # Usa CNPJ manual se informado, caso contrário tenta extrair do documento
-    if cnpj_manual.strip():
-        cnpj = cnpj_manual.strip()
-        status.info(f"✏️ Usando CNPJ informado manualmente: {cnpj}")
-    else:
-        status.info("🔍 Lendo documento e extraindo CNPJ...")
-        cnpj = extrair_cnpj(file_bytes, ext_entrada)
+    # Tenta extrair do documento primeiro; manual só entra como fallback
+    status.info("🔍 Lendo documento e extraindo CNPJ...")
+    cnpj = extrair_cnpj(file_bytes, ext_entrada)
+    origem_cnpj = "documento"
+
+    if not cnpj and cnpj_manual.strip():
+        cnpj = _formatar_cnpj(cnpj_manual)
+        if not cnpj:
+            st.error(
+                "❌ **CNPJ manual em formato inválido.**\n\n"
+                "Use o formato `XX.XXX.XXX/XXXX-XX` ou apenas os 14 dígitos."
+            )
+            st.stop()
+        origem_cnpj = "campo manual"
 
     progress.progress(15)
 
@@ -565,7 +572,7 @@ if gerar and uploaded:
         )
         st.stop()
 
-    st.success(f"✅ CNPJ: **{cnpj}**")
+    st.success(f"✅ CNPJ: **{cnpj}** _(via {origem_cnpj})_")
 
     # PASSO 2 — Pagamentos via API oficial
     status.info(f"🌐 Buscando pagamentos de {mes_selecionado}/{ano} no Portal da Transparência...")
