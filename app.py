@@ -49,13 +49,25 @@ NS_TABLE = 'urn:oasis:names:tc:opendocument:xmlns:table:1.0'
 
 # ─── Funções de extração de CNPJ ────────────────────────────────────────────
 
-CNPJ_REGEX = re.compile(r'\d{2}\.\d{3}\.\d{3}\/\d{4}\s*-\s*\d{2}')
-
-def _normalizar_cnpj(valor):
-    return re.sub(r'\s+', '', valor)
+def _formatar_cnpj(digits):
+    """Formata 14 dígitos no padrão XX.XXX.XXX/XXXX-XX."""
+    d = re.sub(r'\D', '', digits)
+    if len(d) == 14:
+        return f'{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}'
+    return None
 
 def extrair_cnpj_zip(file_bytes):
-    """Extrai CNPJ varrendo todos os XMLs de um arquivo ZIP (docx, dotx, odt)."""
+    """Extrai CNPJ varrendo todos os XMLs de um arquivo ZIP (docx, dotx, odt).
+    Aceita 4 variantes:
+      1. Formatado normal:   22.416.260/0001-85
+      2. Com espaços:        22.416.260/0001 - 85
+      3. Só dígitos:         22416260000185
+      4. Runs separados:     dígitos sem separador no XML compactado
+    """
+    # Padrão 1 e 2: com pontuação (espaços opcionais ao redor de / e -)
+    padrao_fmt = re.compile(r'\d{2}\.\d{3}\.\d{3}\s*[/]\s*\d{4}\s*[-]\s*\d{2}')
+    # Padrão 3: 14 dígitos seguidos (CNPJ sem formatação)
+    padrao_raw = re.compile(r'(?<!\d)(\d{14})(?!\d)')
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
             for nome in z.namelist():
@@ -63,11 +75,29 @@ def extrair_cnpj_zip(file_bytes):
                     continue
                 try:
                     conteudo = z.read(nome).decode('utf-8', errors='ignore')
+                    # Tentativa 1: texto com espaços (remove só as tags)
                     texto = re.sub(r'<[^>]+>', ' ', conteudo)
                     texto = re.sub(r'\s+', ' ', texto)
-                    match = CNPJ_REGEX.search(texto)
+                    match = padrao_fmt.search(texto)
                     if match:
-                        return _normalizar_cnpj(match.group())
+                        return re.sub(r'\s', '', match.group())
+                    # Tentativa 2: texto compactado (sem nenhum espaço)
+                    texto_compact = re.sub(r'<[^>]+>', '', conteudo)
+                    texto_compact = re.sub(r'\s', '', texto_compact)
+                    match2 = padrao_fmt.search(texto_compact)
+                    if match2:
+                        return re.sub(r'\s', '', match2.group())
+                    # Tentativa 3: 14 dígitos após a palavra "CNPJ" (case-insensitive)
+                    m3 = re.search(r'cnpj\s*[:\-]?\s*(\d{14})', texto, re.IGNORECASE)
+                    if m3:
+                        cnpj = _formatar_cnpj(m3.group(1))
+                        if cnpj:
+                            return cnpj
+                    # Tentativa 4: qualquer sequência de 14 dígitos no texto compactado
+                    for m in padrao_raw.finditer(texto_compact):
+                        cnpj = _formatar_cnpj(m.group())
+                        if cnpj:
+                            return cnpj
                 except Exception:
                     continue
     except Exception:
@@ -76,20 +106,21 @@ def extrair_cnpj_zip(file_bytes):
 
 def extrair_cnpj_doc(file_bytes):
     """Extrai CNPJ de arquivo .doc (binário legacy) buscando no conteúdo."""
+    padrao = re.compile(r'\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}')
     # Word .doc armazena texto internamente em UTF-16-LE
     try:
         texto = file_bytes.decode('utf-16-le', errors='ignore')
-        match = CNPJ_REGEX.search(texto)
+        match = padrao.search(texto)
         if match:
-            return _normalizar_cnpj(match.group())
+            return match.group()
     except Exception:
         pass
     # Fallback: latin-1
     try:
         texto = file_bytes.decode('latin-1', errors='ignore')
-        match = CNPJ_REGEX.search(texto)
+        match = padrao.search(texto)
         if match:
-            return _normalizar_cnpj(match.group())
+            return match.group()
     except Exception:
         pass
     # Fallback: strings via subprocess
@@ -98,9 +129,9 @@ def extrair_cnpj_doc(file_bytes):
         tmp.write(file_bytes)
         tmp.close()
         result = subprocess.run(['strings', tmp.name], capture_output=True, text=True, timeout=10)
-        match = CNPJ_REGEX.search(result.stdout)
+        match = padrao.search(result.stdout)
         if match:
-            return _normalizar_cnpj(match.group())
+            return match.group()
     except Exception:
         pass
     return None
@@ -119,7 +150,12 @@ def limpar_cnpj(cnpj):
 # ─── API Portal da Transparência ────────────────────────────────────────────
 
 def get_pagamentos(cnpj_limpo, mes_num, ano):
-    """Busca pagamentos via API oficial do Portal da Transparência."""
+    """Busca pagamentos via API oficial do Portal da Transparência.
+
+    Consulta ano atual E ano anterior, pois o parâmetro 'ano' refere-se ao
+    ano do empenho (orçamento), não ao ano do pagamento. Pagamentos de
+    janeiro/fevereiro/março frequentemente pertencem a empenhos do ano anterior.
+    """
     api_key = st.secrets.get("TRANSPARENCIA_API_KEY", "")
 
     headers = {
@@ -127,52 +163,57 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
         'Accept': 'application/json',
     }
 
+    # Busca nos dois anos: ano do pagamento E ano anterior (empenhos do ano passado)
+    anos_busca = [int(ano), int(ano) - 1]
+
     todos = []
-    pagina = 1
     ultimo_status = None
     ultimo_erro = None
 
-    while True:
-        params = {
-            'codigoPessoa': cnpj_limpo,
-            'fase': 3,
-            'ano': int(ano),
-            'pagina': pagina,
-        }
-        try:
-            r = requests.get(
-                'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido',
-                params=params,
-                headers=headers,
-                timeout=30,
-            )
-            ultimo_status = r.status_code
-            if r.status_code != 200:
-                ultimo_erro = r.text[:300]
+    for ano_busca in anos_busca:
+        pagina = 1
+        while True:
+            params = {
+                'codigoPessoa': cnpj_limpo,
+                'fase': 3,
+                'ano': ano_busca,
+                'pagina': pagina,
+            }
+            try:
+                r = requests.get(
+                    'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido',
+                    params=params,
+                    headers=headers,
+                    timeout=30,
+                )
+                ultimo_status = r.status_code
+                if r.status_code != 200:
+                    ultimo_erro = r.text[:300]
+                    break
+                data = r.json()
+                if not isinstance(data, list) or len(data) == 0:
+                    break
+                todos.extend(data)
+                if len(data) < 500:
+                    break
+                pagina += 1
+            except Exception as e:
+                ultimo_erro = str(e)
                 break
-            data = r.json()
-            if not isinstance(data, list) or len(data) == 0:
-                break
-            todos.extend(data)
-            if len(data) < 500:
-                break
-            pagina += 1
-        except Exception as e:
-            ultimo_erro = str(e)
-            break
 
     pagamentos = []
     mes_str = f'{mes_num:02d}'
+    ano_str = str(ano)
     for item in todos:
         data_pgto = item.get('data', item.get('dataDocumento', ''))
         data_str  = str(data_pgto)
         mes_ok = False
-        if len(data_str) >= 7 and data_str[4:5] == '-' and data_str[5:7] == mes_str:
-            mes_ok = True  # ISO: YYYY-MM-DD
-        elif len(data_str) >= 5 and data_str[2:3] == '/' and data_str[3:5] == mes_str:
-            mes_ok = True  # BR: DD/MM/YYYY
-        elif mes_str in data_str:
-            mes_ok = True  # fallback
+        # BR format: DD/MM/YYYY  → posições 3-4 = mês, 6-9 = ano
+        if len(data_str) >= 10 and data_str[2:3] == '/' and data_str[3:5] == mes_str and data_str[6:10] == ano_str:
+            mes_ok = True
+        # ISO format: YYYY-MM-DD → posições 0-3 = ano, 5-6 = mês
+        elif len(data_str) >= 10 and data_str[4:5] == '-' and data_str[0:4] == ano_str and data_str[5:7] == mes_str:
+            mes_ok = True
         if not mes_ok:
             continue
         doc_num   = item.get('documentoResumido', '') or item.get('documento', '')
@@ -294,12 +335,15 @@ def _odt_cell_text(cell):
 def _odt_set_cell_text(cell, texto):
     """Define texto de uma célula ODT, preservando atributos de estilo da célula."""
     NS_T = f'{{{NS_TEXT}}}'
+    # Encontra o primeiro parágrafo existente (para preservar estilo de parágrafo)
     paragrafos = cell.findall(f'{NS_T}p')
     if paragrafos:
         p = paragrafos[0]
+        # Limpa conteúdo interno do parágrafo
         for child in list(p):
             p.remove(child)
         p.text = texto
+        # Remove parágrafos extras
         for extra in paragrafos[1:]:
             cell.remove(extra)
     else:
@@ -325,29 +369,37 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
     NS_T = f'{{{NS_TEXT}}}'
     NS_TB = f'{{{NS_TABLE}}}'
 
+    # Processa content.xml
     content_xml = files.get('content.xml')
     if content_xml is None:
         raise ValueError("ODT inválido: content.xml não encontrado")
 
     tree = etree.fromstring(content_xml)
+
+    # 1. Substituir mês/ano
     _substituir_mes_ano_odt(tree, mes_abrev, ano)
 
+    # 2. Atualizar tabela de pagamentos
     for table in tree.iter(f'{NS_TB}table'):
         rows = table.findall(f'{NS_TB}table-row')
         if len(rows) < 2:
             continue
+        # Checa se o cabeçalho tem "DOCUMENTO"
         header_cells = rows[0].findall(f'{NS_TB}table-cell')
         if not header_cells:
             continue
         if 'DOCUMENTO' not in _odt_cell_text(header_cells[0]).upper():
             continue
 
-        template_row = rows[1]
-        total_row    = rows[-1]
+        # Encontrou a tabela correta
+        template_row = rows[1]   # segunda linha = template de dados
+        total_row    = rows[-1]  # última linha  = total
 
+        # Remove linhas de dados (entre header e total)
         for row in rows[1:-1]:
             table.remove(row)
 
+        # Insere linhas de pagamento antes da linha de total
         for doc_num, data, valor, _ in pagamentos:
             new_row = copy.deepcopy(template_row)
             cells = new_row.findall(f'{NS_TB}table-cell')
@@ -357,6 +409,7 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
                 _odt_set_cell_text(cells[2], str(valor))
             total_row.addprevious(new_row)
 
+        # Atualiza valor total
         total_cells = total_row.findall(f'{NS_TB}table-cell')
         if len(total_cells) >= 2:
             _odt_set_cell_text(total_cells[1], f'R$ {total_str}')
@@ -368,6 +421,7 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
         tree, xml_declaration=True, encoding='UTF-8', standalone=True
     )
 
+    # Atualiza styles.xml se houver (para cabeçalhos/rodapés)
     if 'styles.xml' in files:
         styles_tree = etree.fromstring(files['styles.xml'])
         _substituir_mes_ano_odt(styles_tree, mes_abrev, ano)
@@ -375,6 +429,7 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
             styles_tree, xml_declaration=True, encoding='UTF-8', standalone=True
         )
 
+    # Remonta o ZIP (mimetype deve ser primeiro e sem compressão)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
         if 'mimetype' in files:
@@ -397,6 +452,7 @@ def processar_doc_libreoffice(file_bytes, filename, mes_abrev, ano, pagamentos, 
     with open(doc_path, 'wb') as f:
         f.write(file_bytes)
 
+    # .doc → .docx
     result = subprocess.run(
         ['libreoffice', '--headless', '--convert-to', 'docx', '--outdir', tmp_dir, doc_path],
         capture_output=True, timeout=90
@@ -414,6 +470,7 @@ def processar_doc_libreoffice(file_bytes, filename, mes_abrev, ano, pagamentos, 
     processed_path = os.path.join(tmp_dir, 'saida.docx')
     doc.save(processed_path)
 
+    # .docx → .doc
     subprocess.run(
         ['libreoffice', '--headless', '--convert-to', 'doc', '--outdir', tmp_dir, processed_path],
         capture_output=True, timeout=90
@@ -423,6 +480,7 @@ def processar_doc_libreoffice(file_bytes, filename, mes_abrev, ano, pagamentos, 
         with open(out_doc, 'rb') as f:
             return f.read(), '.doc'
 
+    # Fallback: retorna como .docx
     with open(processed_path, 'rb') as f:
         return f.read(), '.docx'
 
@@ -446,11 +504,8 @@ def nome_saida(nome_entrada, mes_nome_arquivo, ext_saida=None):
 # ─── Interface ──────────────────────────────────────────────────────────────
 
 st.info(
-    "📌 **Antes de enviar o documento, verifique:**\n\n"
-    "O arquivo deve conter o **CNPJ da empresa** no formato `XX.XXX.XXX/XXXX-XX` "
-    "(geralmente no campo *OCS* do relatório). "
-    "O programa usa o CNPJ para buscar os pagamentos automaticamente no Portal da Transparência. "
-    "Se o documento tiver apenas o nome da empresa, o relatório **não poderá ser gerado**."
+    "📌 O programa tenta extrair o **CNPJ da empresa** automaticamente do documento. "
+    "Caso não encontre, você pode digitá-lo manualmente no campo abaixo."
 )
 
 uploaded = st.file_uploader(
@@ -458,14 +513,20 @@ uploaded = st.file_uploader(
     type=["docx", "dotx", "odt", "doc"]
 )
 
-ano_atual = date.today().year
-anos_disponiveis = list(range(ano_atual, ano_atual - 7, -1))
+cnpj_manual = st.text_input(
+    "CNPJ da empresa (opcional — preencha se o app não encontrar automaticamente)",
+    placeholder="Ex: 22.416.260/0001-85",
+    max_chars=18,
+)
 
 col1, col2 = st.columns(2)
 with col1:
     mes_selecionado = st.selectbox("Mês de referência", MESES_LISTA)
 with col2:
+    ano_atual = date.today().year
+    anos_disponiveis = list(range(ano_atual, ano_atual - 7, -1))
     ano_selecionado = st.selectbox("Ano", anos_disponiveis)
+    ano_input = str(ano_selecionado)
 
 gerar = st.button(
     "📄 Gerar Relatório",
@@ -478,7 +539,7 @@ gerar = st.button(
 if gerar and uploaded:
     mes_num = MESES_LISTA.index(mes_selecionado) + 1
     mes_abrev, mes_nome_arq = MESES[mes_num]
-    ano = str(ano_selecionado)
+    ano = ano_input.strip()
     ext_entrada = os.path.splitext(uploaded.name)[1].lower()
 
     progress = st.progress(0)
@@ -486,16 +547,21 @@ if gerar and uploaded:
     file_bytes = uploaded.read()
 
     # PASSO 1 — CNPJ
-    status.info("🔍 Lendo documento e extraindo CNPJ...")
-    cnpj = extrair_cnpj(file_bytes, ext_entrada)
+    # Usa CNPJ manual se informado, caso contrário tenta extrair do documento
+    if cnpj_manual.strip():
+        cnpj = cnpj_manual.strip()
+        status.info(f"✏️ Usando CNPJ informado manualmente: {cnpj}")
+    else:
+        status.info("🔍 Lendo documento e extraindo CNPJ...")
+        cnpj = extrair_cnpj(file_bytes, ext_entrada)
+
     progress.progress(15)
 
     if not cnpj:
         st.error(
             "❌ **CNPJ não encontrado no documento.**\n\n"
-            "O programa precisa do CNPJ da empresa (formato `XX.XXX.XXX/XXXX-XX`) "
-            "para buscar os pagamentos no Portal da Transparência. "
-            "Adicione o CNPJ ao documento e tente novamente."
+            "O programa não conseguiu localizar o CNPJ automaticamente. "
+            "Digite o CNPJ manualmente no campo acima (formato `XX.XXX.XXX/XXXX-XX`) e tente novamente."
         )
         st.stop()
 
@@ -541,6 +607,7 @@ if gerar and uploaded:
         mime_type = 'application/vnd.oasis.opendocument.text'
 
     elif ext_entrada == '.doc':
+        # Tenta LibreOffice; se não disponível, orienta o usuário
         try:
             output_bytes, ext_saida = processar_doc_libreoffice(
                 file_bytes, uploaded.name, mes_abrev, ano, pagamentos, total_str
