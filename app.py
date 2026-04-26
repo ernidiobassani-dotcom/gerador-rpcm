@@ -351,11 +351,14 @@ def extrair_texto_documento(file_bytes, filename):
 def get_pagamentos(cnpj_limpo, mes_num, ano):
     """Busca pagamentos via API oficial do Portal da Transparência.
 
-    Usa o parâmetro `mesAnoLancamento` (formato MM/AAAA) que filtra
-    pagamentos pela data de lançamento da fase — ou seja, pelo mês em
-    que o pagamento de fato aconteceu, independente do ano do empenho
-    ou do número do documento. Isso é o que o RPCM precisa: pagamentos
-    realizados no mês de referência.
+    A API exige o parâmetro `ano` (do documento/empenho) e aceita
+    `mesAnoLancamento` (mês/ano em que o pagamento foi lançado). Como
+    pagamentos de início de ano costumam vir de empenhos do ano anterior,
+    consultamos o ano informado e o ano-1 — em ambas as buscas, filtrando
+    pelo mês/ano de lançamento (a fase 3 = pagamento). Isso entrega só
+    os pagamentos realizados no mês de referência, mesmo que o empenho
+    seja antigo, sem cair no problema de paginação que aparecia quando
+    se buscava o ano inteiro.
     """
     api_key = st.secrets.get("TRANSPARENCIA_API_KEY", "")
 
@@ -365,39 +368,43 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
     }
 
     mes_ano = f'{mes_num:02d}/{ano}'
+    anos_busca = [int(ano), int(ano) - 1]
+
     todos = []
     ultimo_status = None
     ultimo_erro = None
 
-    pagina = 1
-    while True:
-        params = {
-            'codigoPessoa': cnpj_limpo,
-            'fase': 3,  # 3 = Pagamento
-            'mesAnoLancamento': mes_ano,
-            'pagina': pagina,
-        }
-        try:
-            r = requests.get(
-                'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido',
-                params=params,
-                headers=headers,
-                timeout=30,
-            )
-            ultimo_status = r.status_code
-            if r.status_code != 200:
-                ultimo_erro = r.text[:300]
+    for ano_busca in anos_busca:
+        pagina = 1
+        while True:
+            params = {
+                'codigoPessoa': cnpj_limpo,
+                'fase': 3,  # 3 = Pagamento
+                'ano': ano_busca,
+                'mesAnoLancamento': mes_ano,
+                'pagina': pagina,
+            }
+            try:
+                r = requests.get(
+                    'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido',
+                    params=params,
+                    headers=headers,
+                    timeout=30,
+                )
+                ultimo_status = r.status_code
+                if r.status_code != 200:
+                    ultimo_erro = r.text[:300]
+                    break
+                data = r.json()
+                if not isinstance(data, list) or len(data) == 0:
+                    break
+                todos.extend(data)
+                if len(data) < 500:
+                    break
+                pagina += 1
+            except Exception as e:
+                ultimo_erro = str(e)
                 break
-            data = r.json()
-            if not isinstance(data, list) or len(data) == 0:
-                break
-            todos.extend(data)
-            if len(data) < 500:
-                break
-            pagina += 1
-        except Exception as e:
-            ultimo_erro = str(e)
-            break
 
     # Verificação adicional: confirma que cada item está no mês/ano pedido.
     # A API já filtra, mas mantemos a checagem como guarda de segurança.
