@@ -696,7 +696,10 @@ if uploaded is not None:
                 st.session_state.nome_empresa_ocs = extrair_nome_ocs(texto_doc)
                 cnpjs = extrair_cnpjs_texto(texto_doc)
                 if cnpjs:
+                    # CNPJ encontrado e validado pelo DV — auto-confirma sem
+                    # exigir clique do usuário. Se quiser trocar, usa o botão.
                     st.session_state.cnpj_extraido = cnpjs[0]
+                    st.session_state.cnpj_confirmado = _formatar_cnpj(cnpjs[0])
                     info_auto = consultar_empresa(cnpjs[0])
                     if info_auto:
                         st.session_state.empresa_info = info_auto
@@ -709,48 +712,38 @@ if uploaded is not None:
 # Bloco de CNPJ — depende do estado atual
 if uploaded is not None:
     if st.session_state.cnpj_confirmado:
-        # CNPJ já confirmado
+        # CNPJ confirmado (automático ou manual). Mostra dados e permite trocar.
         info = st.session_state.empresa_info or {}
-        st.success(
-            f"✅ CNPJ confirmado: **{st.session_state.cnpj_confirmado}** — "
-            f"{info.get('razao_social', '')}"
-        )
-        if st.button("🔄 Trocar CNPJ", help="Use outro CNPJ neste documento"):
-            st.session_state.cnpj_confirmado = None
-            st.session_state.empresa_info = None
-            st.session_state.modo_manual = True
-            st.rerun()
-
-    elif st.session_state.cnpj_extraido and not st.session_state.modo_manual:
-        # CNPJ extraído automaticamente — pede confirmação
-        cnpj_fmt = _formatar_cnpj(st.session_state.cnpj_extraido)
-        info = st.session_state.empresa_info or {}
-        st.success(f"🔍 CNPJ extraído automaticamente do documento: **{cnpj_fmt}**")
+        razao = info.get('razao_social', '')
+        if st.session_state.cnpj_extraido:
+            st.success(
+                f"🔍 CNPJ identificado automaticamente no documento: "
+                f"**{st.session_state.cnpj_confirmado}**"
+            )
+        else:
+            st.success(
+                f"✅ CNPJ confirmado: **{st.session_state.cnpj_confirmado}**"
+            )
         if info:
             nome_fantasia = info.get('nome_fantasia', '').strip()
             extra = ''
-            if nome_fantasia and nome_fantasia.lower() != info.get('razao_social', '').strip().lower():
+            if nome_fantasia and nome_fantasia.lower() != razao.strip().lower():
                 extra = f"  \n**Nome fantasia:** {nome_fantasia}"
             st.markdown(
-                f"**Empresa:** {info.get('razao_social', '')}{extra}  \n"
+                f"**Empresa:** {razao}{extra}  \n"
                 f"**Situação cadastral:** {info.get('situacao', '')}"
             )
-        else:
-            st.warning(
-                "⚠️ Não foi possível consultar a BrasilAPI agora. "
-                "Você pode confirmar o CNPJ mesmo assim ou digitar outro."
+        elif st.session_state.cnpj_extraido:
+            st.caption(
+                "ℹ️ Não foi possível consultar a BrasilAPI agora — "
+                "os dados da empresa não estão disponíveis, mas o CNPJ foi validado."
             )
-
-        col_conf, col_troc = st.columns([2, 1])
-        with col_conf:
-            if st.button("✅ Confirmar este CNPJ", type="primary", use_container_width=True):
-                st.session_state.cnpj_confirmado = cnpj_fmt
-                st.rerun()
-        with col_troc:
-            if st.button("🔄 Não é esse — digitar outro", use_container_width=True):
-                st.session_state.modo_manual = True
-                st.session_state.empresa_info = None
-                st.rerun()
+        if st.button("🔄 Trocar CNPJ", help="Use outro CNPJ neste documento"):
+            st.session_state.cnpj_confirmado = None
+            st.session_state.empresa_info = None
+            st.session_state.cnpj_extraido = None
+            st.session_state.modo_manual = True
+            st.rerun()
 
     else:
         # Modo manual: extração falhou ou usuário pediu pra trocar
