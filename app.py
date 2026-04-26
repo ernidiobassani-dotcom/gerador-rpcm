@@ -16,13 +16,203 @@ from docx.oxml.ns import qn
 
 st.set_page_config(
     page_title="Gerador de RPCM",
-    page_icon="📋",
-    layout="centered"
+    page_icon="⚕️",
+    layout="centered",
 )
 
-st.title("📋 Gerador de RPCM")
-st.markdown("**Relatório de Prestação de Contas Mensal — Contratos de Credenciamento**")
-st.markdown("---")
+# ─── Identidade visual ──────────────────────────────────────────────────────
+# Tema "Saúde Militar" — verde-oliva + dourado-arenoso, sem elementos oficiais
+COR_PRIMARIA = "#3D4F2D"
+COR_PRIMARIA_CLARA = "#4A5F38"
+COR_DOURADO = "#B8985A"
+COR_DOURADO_CLARO = "#D4B872"
+COR_PAPEL = "#F8F5EE"
+COR_PAPEL_ESCURO = "#EDE8DA"
+COR_TEXTO = "#2C2C2C"
+COR_TEXTO_FRACO = "#6B6B6B"
+COR_ERRO = "#8B3A3A"
+
+CSS_GLOBAL = f"""
+<style>
+.main .block-container {{
+    padding-top: 1.4rem;
+    padding-bottom: 3rem;
+    max-width: 760px;
+}}
+
+/* Header banner */
+.app-header {{
+    background: linear-gradient(135deg, {COR_PRIMARIA} 0%, {COR_PRIMARIA_CLARA} 100%);
+    color: {COR_PAPEL};
+    padding: 1.6rem 1.8rem 1.3rem;
+    border-radius: 10px;
+    margin-bottom: 0;
+    box-shadow: 0 4px 14px rgba(40, 50, 25, 0.18);
+    display: flex;
+    align-items: center;
+    gap: 1.1rem;
+}}
+.app-header .logo {{ flex-shrink: 0; }}
+.app-header h1 {{
+    margin: 0;
+    color: {COR_PAPEL};
+    font-size: 1.55rem;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    line-height: 1.2;
+}}
+.app-header p {{
+    margin: 0.25rem 0 0;
+    color: #D9CFB5;
+    font-size: 0.88rem;
+    font-weight: 400;
+}}
+
+.gold-divider {{
+    height: 3px;
+    background: linear-gradient(90deg, {COR_DOURADO} 0%, {COR_DOURADO_CLARO} 50%, {COR_DOURADO} 100%);
+    margin: 0 0 1.6rem 0;
+    border-radius: 2px;
+}}
+
+/* Cabeçalhos de seção numerados */
+.section-header {{
+    color: {COR_PRIMARIA};
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin: 1.6rem 0 0.7rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid {COR_DOURADO};
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    letter-spacing: 0.3px;
+}}
+.section-number {{
+    background: {COR_PRIMARIA};
+    color: {COR_PAPEL};
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.82rem;
+    font-weight: 700;
+    flex-shrink: 0;
+}}
+
+/* Botões */
+.stButton > button {{
+    border-radius: 6px;
+    font-weight: 500;
+    transition: all 0.15s ease;
+}}
+.stButton > button[kind="primary"] {{
+    background-color: {COR_PRIMARIA};
+    border-color: {COR_PRIMARIA};
+    color: {COR_PAPEL};
+    box-shadow: 0 2px 6px rgba(61, 79, 45, 0.25);
+}}
+.stButton > button[kind="primary"]:hover {{
+    background-color: {COR_PRIMARIA_CLARA};
+    border-color: {COR_PRIMARIA_CLARA};
+    box-shadow: 0 3px 10px rgba(61, 79, 45, 0.35);
+}}
+.stButton > button:not([kind="primary"]) {{
+    border-color: {COR_DOURADO};
+    color: {COR_PRIMARIA};
+}}
+.stButton > button:not([kind="primary"]):hover {{
+    border-color: {COR_PRIMARIA};
+    color: {COR_PRIMARIA};
+    background-color: {COR_PAPEL_ESCURO};
+}}
+
+/* Caixas de mensagem */
+div[data-testid="stAlert"] {{ border-radius: 6px; }}
+div[data-testid="stFileUploader"] section {{
+    border: 1px dashed {COR_DOURADO};
+    border-radius: 8px;
+    background-color: rgba(184, 152, 90, 0.05);
+}}
+div[data-testid="stFileUploader"] section:hover {{
+    border-color: {COR_PRIMARIA};
+    background-color: rgba(61, 79, 45, 0.04);
+}}
+
+/* Inputs e selectboxes */
+input, .stTextInput input {{
+    border-radius: 6px !important;
+}}
+
+/* Download button (saída final) */
+div[data-testid="stDownloadButton"] button {{
+    background-color: {COR_DOURADO} !important;
+    border-color: {COR_DOURADO} !important;
+    color: {COR_PRIMARIA} !important;
+    font-weight: 600 !important;
+}}
+div[data-testid="stDownloadButton"] button:hover {{
+    background-color: {COR_DOURADO_CLARO} !important;
+    border-color: {COR_DOURADO_CLARO} !important;
+}}
+
+/* Footer */
+.app-footer {{
+    margin-top: 2.5rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid {COR_DOURADO};
+    color: {COR_TEXTO_FRACO};
+    font-size: 0.78rem;
+    text-align: center;
+    line-height: 1.6;
+}}
+.app-footer strong {{ color: {COR_PRIMARIA}; }}
+
+/* Esconde menu/footer Streamlit pra ficar mais limpo */
+#MainMenu {{ visibility: hidden; }}
+footer {{ visibility: hidden; }}
+</style>
+"""
+
+LOGO_SVG = f"""
+<svg class="logo" width="58" height="58" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+  <!-- Escudo -->
+  <path d="M30 4 L52 11 V32 Q52 49 30 56 Q8 49 8 32 V11 Z"
+        fill="{COR_PAPEL}" stroke="{COR_DOURADO}" stroke-width="2"/>
+  <!-- Cruz médica -->
+  <rect x="26" y="17" width="8" height="24" fill="{COR_PRIMARIA}" rx="1"/>
+  <rect x="18" y="25" width="24" height="8" fill="{COR_PRIMARIA}" rx="1"/>
+  <!-- Detalhe dourado central -->
+  <circle cx="30" cy="29" r="2.2" fill="{COR_DOURADO}"/>
+</svg>
+"""
+
+st.markdown(CSS_GLOBAL, unsafe_allow_html=True)
+
+st.markdown(
+    f"""
+    <div class="app-header">
+      {LOGO_SVG}
+      <div>
+        <h1>Gerador de RPCM</h1>
+        <p>Relatório de Prestação de Contas Mensal &middot; Contratos de Credenciamento</p>
+      </div>
+    </div>
+    <div class="gold-divider"></div>
+    """,
+    unsafe_allow_html=True,
+)
+
+def _section_header(numero, titulo):
+    """Renderiza um cabeçalho de seção numerado e estilizado."""
+    st.markdown(
+        f'<div class="section-header">'
+        f'<span class="section-number">{numero}</span>{titulo}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 MESES = {
     1:  ("JAN", "JANEIRO"),
@@ -665,14 +855,16 @@ for _k, _v in [
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-st.info(
-    "📌 Envie o documento RPCM. O CNPJ é **extraído automaticamente** "
-    "do arquivo. Se não for possível, você poderá digitá-lo manualmente."
+_section_header(1, "Documento base")
+st.caption(
+    "Envie o RPCM modelo. O CNPJ é extraído automaticamente; "
+    "se não for possível, você poderá digitá-lo na próxima seção."
 )
 
 uploaded = st.file_uploader(
-    "📎 Selecione o documento base (.docx, .dotx, .odt ou .doc)",
-    type=["docx", "dotx", "odt", "doc"]
+    "Selecione o arquivo (.docx, .dotx, .odt ou .doc)",
+    type=["docx", "dotx", "odt", "doc"],
+    label_visibility="collapsed",
 )
 
 # Detecta upload novo e roda extração automática
@@ -690,7 +882,7 @@ if uploaded is not None:
         st.session_state.nome_empresa_ocs = None
         st.session_state.modo_manual = False
 
-        with st.spinner("🔍 Lendo documento e extraindo CNPJ..."):
+        with st.spinner("Lendo documento e extraindo CNPJ..."):
             try:
                 texto_doc = extrair_texto_documento(_bytes_atual, uploaded.name)
                 st.session_state.nome_empresa_ocs = extrair_nome_ocs(texto_doc)
@@ -711,18 +903,19 @@ if uploaded is not None:
 
 # Bloco de CNPJ — depende do estado atual
 if uploaded is not None:
+    _section_header(2, "Empresa contratada")
     if st.session_state.cnpj_confirmado:
         # CNPJ confirmado (automático ou manual). Mostra dados e permite trocar.
         info = st.session_state.empresa_info or {}
         razao = info.get('razao_social', '')
         if st.session_state.cnpj_extraido:
             st.success(
-                f"🔍 CNPJ identificado automaticamente no documento: "
+                f"CNPJ identificado automaticamente no documento — "
                 f"**{st.session_state.cnpj_confirmado}**"
             )
         else:
             st.success(
-                f"✅ CNPJ confirmado: **{st.session_state.cnpj_confirmado}**"
+                f"CNPJ confirmado — **{st.session_state.cnpj_confirmado}**"
             )
         if info:
             nome_fantasia = info.get('nome_fantasia', '').strip()
@@ -735,10 +928,10 @@ if uploaded is not None:
             )
         elif st.session_state.cnpj_extraido:
             st.caption(
-                "ℹ️ Não foi possível consultar a BrasilAPI agora — "
-                "os dados da empresa não estão disponíveis, mas o CNPJ foi validado."
+                "Não foi possível consultar a BrasilAPI agora — os dados "
+                "da empresa não estão disponíveis, mas o CNPJ foi validado."
             )
-        if st.button("🔄 Trocar CNPJ", help="Use outro CNPJ neste documento"):
+        if st.button("Trocar CNPJ", help="Usar outro CNPJ neste documento"):
             st.session_state.cnpj_confirmado = None
             st.session_state.empresa_info = None
             st.session_state.cnpj_extraido = None
@@ -748,10 +941,10 @@ if uploaded is not None:
     else:
         # Modo manual: extração falhou ou usuário pediu pra trocar
         if not st.session_state.cnpj_extraido:
-            msg = "⚠️ Não consegui extrair o CNPJ automaticamente do documento."
+            msg = "Não foi possível extrair o CNPJ automaticamente do documento."
             if st.session_state.nome_empresa_ocs:
                 msg += f"\n\n**Empresa identificada no documento:** {st.session_state.nome_empresa_ocs}"
-            msg += "\n\nPor favor, digite o CNPJ manualmente:"
+            msg += "\n\nDigite o CNPJ manualmente abaixo:"
             st.warning(msg)
 
         cnpj_input = st.text_input(
@@ -761,7 +954,7 @@ if uploaded is not None:
         )
         cnpj_formatado_atual = _formatar_cnpj(cnpj_input) if cnpj_input.strip() else None
 
-        if st.button("🔍 Buscar empresa", disabled=(cnpj_formatado_atual is None)):
+        if st.button("Buscar empresa", disabled=(cnpj_formatado_atual is None)):
             with st.spinner("Consultando BrasilAPI..."):
                 info_m = consultar_empresa(limpar_cnpj(cnpj_formatado_atual))
             if info_m:
@@ -769,7 +962,7 @@ if uploaded is not None:
             else:
                 st.session_state.empresa_info = None
                 st.error(
-                    "❌ Não foi possível consultar essa empresa. "
+                    "Não foi possível consultar essa empresa. "
                     "Verifique o CNPJ ou tente novamente em alguns segundos."
                 )
 
@@ -783,13 +976,14 @@ if uploaded is not None:
                 f"**Empresa encontrada:** {info['razao_social']}{extra}  \n"
                 f"**Situação cadastral:** {info['situacao']}"
             )
-            if st.button("✅ Confirmar e usar este CNPJ", type="primary"):
+            if st.button("Confirmar e usar este CNPJ", type="primary"):
                 st.session_state.cnpj_confirmado = cnpj_formatado_atual
                 st.rerun()
 
+_section_header(3, "Período de referência")
 col1, col2 = st.columns(2)
 with col1:
-    mes_selecionado = st.selectbox("Mês de referência", MESES_LISTA)
+    mes_selecionado = st.selectbox("Mês", MESES_LISTA)
 with col2:
     ano_atual = date.today().year
     anos_disponiveis = list(range(ano_atual, ano_atual - 7, -1))
@@ -804,22 +998,27 @@ else:
     mes_anterior_num, ano_anterior_num = hoje.month - 1, hoje.year
 label_mes_anterior = MESES_LISTA[mes_anterior_num - 1]
 
+_section_header(4, "Geração do relatório")
 botoes_disabled = (uploaded is None) or (st.session_state.cnpj_confirmado is None)
+if botoes_disabled:
+    st.caption(
+        "_Aguardando o documento e a confirmação do CNPJ para liberar a geração._"
+    )
 
 botao_col1, botao_col2 = st.columns(2)
 with botao_col1:
     gerar = st.button(
-        "📄 Gerar Relatório",
+        "Gerar relatório",
         type="primary",
         disabled=botoes_disabled,
         use_container_width=True,
     )
 with botao_col2:
     gerar_mes_anterior = st.button(
-        f"⚡ Gerar — {label_mes_anterior}/{ano_anterior_num}",
+        f"Atalho — {label_mes_anterior}/{ano_anterior_num}",
         disabled=botoes_disabled,
         use_container_width=True,
-        help="Atalho: gera o relatório referente ao mês anterior à data de hoje.",
+        help="Gera o relatório referente ao mês anterior à data de hoje.",
     )
 
 # ─── Lógica principal ───────────────────────────────────────────────────────
@@ -844,36 +1043,26 @@ if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirma
     progress.progress(15)
 
     # PASSO 2 — Pagamentos via API oficial
-    status.info(f"🌐 Buscando pagamentos de {mes_selecionado}/{ano} no Portal da Transparência...")
+    status.info(f"Buscando pagamentos de {mes_selecionado}/{ano} no Portal da Transparência...")
     pagamentos, api_status, api_erro, todos_brutos = get_pagamentos(limpar_cnpj(cnpj), mes_num, ano)
     progress.progress(65)
 
-    # Debug: mostra dados brutos da API
-    with st.expander("🔍 Debug — resposta bruta da API"):
-        st.write(f"**Status HTTP:** {api_status}")
-        st.write(f"**Total de registros retornados pela API (todos os meses):** {len(todos_brutos)}")
-        if api_erro:
-            st.write(f"**Erro:** {api_erro}")
-        if todos_brutos:
-            st.write("**Primeiros registros (raw):**")
-            st.json(todos_brutos[:5])
-
     if len(pagamentos) == 0:
-        msg = f"⚠️ Nenhum pagamento encontrado para {mes_selecionado}/{ano}. O relatório será gerado com tabela vazia."
+        msg = f"Nenhum pagamento encontrado para {mes_selecionado}/{ano}. O relatório será gerado com tabela vazia."
         if api_status and api_status != 200:
-            msg += f"\n\n🔍 **Debug:** API retornou status **{api_status}**."
+            msg += f"\n\n_API retornou status **{api_status}**._"
             if api_erro:
                 msg += f" Resposta: `{api_erro}`"
         elif api_status is None:
-            msg += "\n\n🔍 **Debug:** Não foi possível conectar à API (timeout ou erro de rede)."
+            msg += "\n\n_Não foi possível conectar à API (timeout ou erro de rede)._"
         st.warning(msg)
         total_str = "0,00"
     else:
         total_str = calcular_total(pagamentos)
-        st.info(f"📋 {len(pagamentos)} pagamento(s) | Total: **R$ {total_str}**")
+        st.info(f"**{len(pagamentos)} pagamento(s)** localizados · Total: **R$ {total_str}**")
 
     # PASSO 3 — Gerar documento
-    status.info("📝 Atualizando documento...")
+    status.info("Atualizando documento...")
     ext_saida = ext_entrada
     mime_type = 'application/octet-stream'
 
@@ -890,13 +1079,13 @@ if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirma
             )
             if ext_saida == '.docx':
                 st.warning(
-                    "⚠️ Não foi possível manter o formato `.doc`. "
+                    "Não foi possível manter o formato `.doc`. "
                     "O arquivo foi salvo como `.docx`."
                 )
             mime_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         except Exception:
             st.error(
-                "❌ **Formato `.doc` não suportado para processamento automático.**\n\n"
+                "**Formato `.doc` não suportado para processamento automático.**\n\n"
                 "O formato `.doc` (Word 97-2003) requer conversão prévia. "
                 "Por favor, abra o arquivo no Word e salve como **`.docx`**, "
                 "depois envie novamente."
@@ -916,23 +1105,48 @@ if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirma
     progress.progress(90)
     output_name = nome_saida(uploaded.name, mes_nome_arq, ext_saida)
     progress.progress(100)
-    status.success("✅ Documento gerado com sucesso!")
+    status.success("Documento gerado.")
 
     st.download_button(
-        label=f"⬇️ Baixar {output_name}",
+        label=f"⬇  Baixar {output_name}",
         data=output_bytes,
         file_name=output_name,
         mime=mime_type,
-        type="primary"
+        type="primary",
+        use_container_width=True,
     )
 
     if pagamentos:
-        st.markdown("### Pagamentos incluídos:")
+        st.markdown(
+            f'<div class="section-header" style="margin-top:1.6rem">'
+            f'<span class="section-number">5</span>Pagamentos incluídos'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
         import pandas as pd
         rows = [(d, dt, v) for d, dt, v, _ in pagamentos]
         rows.append(("", "Valor Total", f"R$ {total_str}"))
         df = pd.DataFrame(rows, columns=["Documento", "Data", "Valor"])
         st.dataframe(df, hide_index=True, use_container_width=True)
 
-st.markdown("---")
-st.caption("Dados obtidos do Portal da Transparência do Governo Federal · UG 167399")
+    # Detalhes técnicos (debug) — discreto, ao final
+    with st.expander("Detalhes técnicos da requisição (avançado)"):
+        st.write(f"**Status HTTP:** {api_status}")
+        st.write(f"**Total de registros retornados pela API:** {len(todos_brutos)}")
+        if api_erro:
+            st.write(f"**Erro:** {api_erro}")
+        if todos_brutos:
+            st.write("**Primeiros registros (raw):**")
+            st.json(todos_brutos[:5])
+
+# ─── Rodapé ─────────────────────────────────────────────────────────────────
+
+st.markdown(
+    """
+    <div class="app-footer">
+      <strong>Aplicativo não oficial.</strong> Uso interno.<br>
+      Dados públicos do Portal da Transparência do Governo Federal · UG 167399
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
