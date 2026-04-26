@@ -77,6 +77,98 @@ def consultar_empresa(cnpj_limpo):
         pass
     return None
 
+def validar_cnpj_dv(cnpj):
+    """Valida os 2 dígitos verificadores do CNPJ."""
+    d = re.sub(r'\D', '', cnpj)
+    if len(d) != 14 or len(set(d)) == 1:
+        return False
+    pesos1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+    soma = sum(int(d[i]) * pesos1[i] for i in range(12))
+    dv1 = 0 if soma % 11 < 2 else 11 - (soma % 11)
+    if dv1 != int(d[12]):
+        return False
+    pesos2 = [6] + pesos1
+    soma = sum(int(d[i]) * pesos2[i] for i in range(13))
+    dv2 = 0 if soma % 11 < 2 else 11 - (soma % 11)
+    return dv2 == int(d[13])
+
+def extrair_cnpjs_texto(texto):
+    """Extrai todos os CNPJs válidos (com DV correto) do texto. Retorna lista
+    de strings de 14 dígitos limpos, na ordem em que aparecem, sem duplicatas."""
+    padrao = re.compile(r'\d{2}[\s.\-/]*\d{3}[\s.\-/]*\d{3}[\s.\-/]*\d{4}[\s.\-/]*\d{2}')
+    encontrados = []
+    vistos = set()
+    for cand in padrao.findall(texto):
+        limpo = re.sub(r'\D', '', cand)
+        if len(limpo) == 14 and limpo not in vistos and validar_cnpj_dv(limpo):
+            vistos.add(limpo)
+            encontrados.append(limpo)
+    return encontrados
+
+def extrair_nome_ocs(texto):
+    """Tenta extrair o nome da empresa a partir do campo 'OCS:' do documento.
+    Retorna string ou None."""
+    m = re.search(
+        r'OCS\s*:?\s*([^.\n,]+?)(?:\.|\bCNPJ\b|\n|$)',
+        texto,
+        re.IGNORECASE,
+    )
+    if m:
+        nome = m.group(1).strip()
+        if nome:
+            return nome
+    return None
+
+def extrair_texto_documento(file_bytes, filename):
+    """Extrai todo o texto de um documento (.docx/.dotx/.odt/.doc).
+    Para .doc, usa LibreOffice para converter antes."""
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext in ('.docx', '.dotx'):
+        doc = abrir_documento(file_bytes, filename)
+        partes = [p.text for p in doc.paragraphs]
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    partes.append(cell.text)
+        return '\n'.join(partes)
+
+    if ext == '.odt':
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                content = z.read('content.xml')
+            tree = etree.fromstring(content)
+            partes = []
+            for node in tree.iter():
+                if node.text:
+                    partes.append(node.text)
+                if node.tail:
+                    partes.append(node.tail)
+            return ' '.join(partes)
+        except Exception:
+            return ''
+
+    if ext == '.doc':
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            doc_path = os.path.join(tmp_dir, filename)
+            with open(doc_path, 'wb') as f:
+                f.write(file_bytes)
+            subprocess.run(
+                ['libreoffice', '--headless', '--convert-to', 'docx',
+                 '--outdir', tmp_dir, doc_path],
+                capture_output=True, timeout=90,
+            )
+            docx_path = os.path.join(tmp_dir, os.path.splitext(filename)[0] + '.docx')
+            if os.path.exists(docx_path):
+                with open(docx_path, 'rb') as f:
+                    return extrair_texto_documento(f.read(), docx_path)
+        except Exception:
+            pass
+        return ''
+
+    return ''
+
 # ─── API Portal da Transparência ────────────────────────────────────────────
 
 def get_pagamentos(cnpj_limpo, mes_num, ano):
@@ -233,10 +325,14 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
         tbl = table._tbl
         all_rows = list(table.rows)
 
-        # Detecta linha de TOTAL pelo conteúdo da primeira célula
+        # Detecta linha de TOTAL: procura "TOTAL" em qualquer célula da linha
+        # (mais robusto que olhar só a primeira — funciona com templates antigos
+        # que têm "TOTAL PAGO" na col 1 e com o formato novo, em que a col 1
+        # fica vazia e o label "Valor Total" vai na col 2)
         total_tr = None
         for row in all_rows[1:]:
-            if 'TOTAL' in row.cells[0].text.upper():
+            row_text = ' '.join(c.text for c in row.cells).upper()
+            if 'TOTAL' in row_text:
                 total_tr = row._tr
                 break
 
@@ -253,52 +349,71 @@ def atualizar_documento(doc, mes_abrev, ano, pagamentos, total_str):
         for tr in data_trs:
             tbl.remove(tr)
 
+        def set_tc_text(tc, texto):
+            """Sobrescreve o texto de uma célula DOCX preservando o estilo do
+            primeiro run (rPr) e a formatação do parágrafo."""
+            para = tc.find(qn('w:p'))
+            if para is None:
+                para = etree.SubElement(tc, f'{{{W}}}p')
+            old_r = para.find(qn('w:r'))
+            rPr = old_r.find(qn('w:rPr')) if old_r is not None else None
+            for r in para.findall(qn('w:r')):
+                para.remove(r)
+            new_r = etree.SubElement(para, f'{{{W}}}r')
+            if rPr is not None:
+                new_r.insert(0, copy.deepcopy(rPr))
+            t = etree.SubElement(new_r, f'{{{W}}}t')
+            t.text = texto
+            if texto and (texto.startswith(' ') or texto.endswith(' ')):
+                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+
         def make_row(doc_num, data, valor):
             new_tr = copy.deepcopy(template_tr)
             tcs = new_tr.findall(qn('w:tc'))
             for tc, texto in zip(tcs, [doc_num, data, valor]):
-                para   = tc.find(qn('w:p'))
-                old_r  = para.find(qn('w:r'))
-                rPr    = old_r.find(qn('w:rPr')) if old_r is not None else None
-                for r in para.findall(qn('w:r')):
-                    para.remove(r)
-                new_r = etree.SubElement(para, f'{{{W}}}r')
-                if rPr is not None:
-                    new_r.insert(0, copy.deepcopy(rPr))
-                t = etree.SubElement(new_r, f'{{{W}}}t')
-                t.text = texto
-                if texto.startswith(' ') or texto.endswith(' '):
-                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                set_tc_text(tc, texto)
             return new_tr
+
+        def aplicar_negrito_celula(tc):
+            for r in tc.iter(qn('w:r')):
+                rPr = r.find(qn('w:rPr'))
+                if rPr is None:
+                    rPr = etree.Element(f'{{{W}}}rPr')
+                    r.insert(0, rPr)
+                if rPr.find(qn('w:b')) is None:
+                    etree.SubElement(rPr, f'{{{W}}}b')
 
         if total_tr is not None:
             for doc_num, data, valor, _ in pagamentos:
                 total_tr.addprevious(make_row(doc_num, data, valor))
-            # Total vai sempre na ÚLTIMA célula da linha de total
+
+            # Reescreve a linha do total no formato Opção B:
+            # col 1 vazia | col 2: "Valor Total" | col 3: "R$ X,XX"
             tcs = total_tr.findall(qn('w:tc'))
-            if tcs:
-                target_tc = tcs[-1]
-                para = target_tc.find(qn('w:p'))
-                if para is not None:
-                    runs = para.findall(qn('w:r'))
-                    if runs:
-                        # Atualiza o último run com o texto e zera os demais
-                        for r in runs[:-1]:
-                            t = r.find(qn('w:t'))
-                            if t is not None:
-                                t.text = ''
-                        last_t = runs[-1].find(qn('w:t'))
-                        if last_t is None:
-                            last_t = etree.SubElement(runs[-1], f'{{{W}}}t')
-                        last_t.text = f'R$ {total_str}'
-                    else:
-                        new_r = etree.SubElement(para, f'{{{W}}}r')
-                        t = etree.SubElement(new_r, f'{{{W}}}t')
-                        t.text = f'R$ {total_str}'
+            if len(tcs) >= 3:
+                # Já tem 3+ células — sobrescreve as 3 primeiras, mantém formatação
+                set_tc_text(tcs[0], '')
+                set_tc_text(tcs[1], 'Valor Total')
+                set_tc_text(tcs[2], f'R$ {total_str}')
+                for extra in tcs[3:]:
+                    set_tc_text(extra, '')
+            else:
+                # Linha tem células mescladas (ex.: gridSpan=2). Substitui por
+                # uma linha nova baseada na linha de dados (3 células) e aplica
+                # negrito (típico de linha de total)
+                new_total_tr = make_row('', 'Valor Total', f'R$ {total_str}')
+                for tc in new_total_tr.findall(qn('w:tc')):
+                    aplicar_negrito_celula(tc)
+                total_tr.addprevious(new_total_tr)
+                tbl.remove(total_tr)
         else:
-            # Sem linha de TOTAL no template — apenas anexa pagamentos
+            # Sem linha de TOTAL no template — anexa pagamentos e cria linha de total
             for doc_num, data, valor, _ in pagamentos:
                 tbl.append(make_row(doc_num, data, valor))
+            new_total_tr = make_row('', 'Valor Total', f'R$ {total_str}')
+            for tc in new_total_tr.findall(qn('w:tc')):
+                aplicar_negrito_celula(tc)
+            tbl.append(new_total_tr)
         break
 
     return doc
@@ -390,11 +505,13 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
         if 'DOCUMENTO' not in _odt_cell_text(header_cells[0]).upper():
             continue
 
-        # Detecta linha de TOTAL: primeira célula contém "TOTAL"
+        # Detecta linha de TOTAL: procura "TOTAL" em qualquer célula da linha
+        # (suporta tanto template antigo quanto o formato Opção B com col 1 vazia)
         total_row = None
         for r in rows[1:]:
             cells = r.findall(f'{NS_TB}table-cell')
-            if cells and 'TOTAL' in _odt_cell_text(cells[0]).upper():
+            row_text = ' '.join(_odt_cell_text(c) for c in cells).upper()
+            if 'TOTAL' in row_text:
                 total_row = r
                 break
 
@@ -422,19 +539,31 @@ def atualizar_odt(file_bytes, mes_abrev, ano, pagamentos, total_str):
                 _odt_set_cell_text(cells[2], str(valor))
             return new_row
 
-        # Insere as novas linhas de pagamento
+        # Insere as novas linhas de pagamento e reescreve a linha do total
         if total_row is not None:
             for doc_num, data, valor, _ in pagamentos:
                 total_row.addprevious(_make_row(doc_num, data, valor))
-            # Atualiza valor total — sempre na ÚLTIMA célula do total_row
-            # (em modelos com merge é a célula 2; em modelos sem merge é a 3).
+
+            # Reescreve a linha do total no formato Opção B:
+            # col 1 vazia | col 2: "Valor Total" | col 3: "R$ X,XX"
             total_cells = total_row.findall(f'{NS_TB}table-cell')
-            if total_cells:
-                _odt_set_cell_text(total_cells[-1], f'R$ {total_str}')
+            if len(total_cells) >= 3:
+                _odt_set_cell_text(total_cells[0], '')
+                _odt_set_cell_text(total_cells[1], 'Valor Total')
+                _odt_set_cell_text(total_cells[2], f'R$ {total_str}')
+                for extra in total_cells[3:]:
+                    _odt_set_cell_text(extra, '')
+            else:
+                # Linha tem células mescladas — substitui por uma nova baseada
+                # na linha de dados (3 células com mesma formatação)
+                new_total_row = _make_row('', 'Valor Total', f'R$ {total_str}')
+                total_row.addprevious(new_total_row)
+                table.remove(total_row)
         else:
-            # Modelo sem linha de TOTAL — apenas anexa as linhas de pagamento
+            # Sem linha de TOTAL no template — anexa pagamentos e cria linha de total
             for doc_num, data, valor, _ in pagamentos:
                 table.append(_make_row(doc_num, data, valor))
+            table.append(_make_row('', 'Valor Total', f'R$ {total_str}'))
         break
 
     files['content.xml'] = etree.tostring(
@@ -523,13 +652,22 @@ def nome_saida(nome_entrada, mes_nome_arquivo, ext_saida=None):
 
 # ─── Interface ──────────────────────────────────────────────────────────────
 
-if 'cnpj_confirmado' not in st.session_state:
-    st.session_state.cnpj_confirmado = None
-if 'empresa_info' not in st.session_state:
-    st.session_state.empresa_info = None
+# Estado da sessão
+for _k, _v in [
+    ('cnpj_confirmado', None),
+    ('empresa_info', None),
+    ('arquivo_chave', None),
+    ('file_bytes', None),
+    ('cnpj_extraido', None),
+    ('nome_empresa_ocs', None),
+    ('modo_manual', False),
+]:
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 st.info(
-    "📌 Digite o **CNPJ da empresa**, busque a razão social e confirme antes de gerar o relatório."
+    "📌 Envie o documento RPCM. O CNPJ é **extraído automaticamente** "
+    "do arquivo. Se não for possível, você poderá digitá-lo manualmente."
 )
 
 uploaded = st.file_uploader(
@@ -537,60 +675,124 @@ uploaded = st.file_uploader(
     type=["docx", "dotx", "odt", "doc"]
 )
 
-cnpj_input = st.text_input(
-    "CNPJ da empresa",
-    placeholder="22.416.260/0001-85 ou apenas os 14 dígitos",
-    max_chars=18,
-)
+# Detecta upload novo e roda extração automática
+if uploaded is not None:
+    _bytes_atual = uploaded.getvalue()
+    _chave_atual = f"{uploaded.name}|{len(_bytes_atual)}"
 
-cnpj_formatado_atual = _formatar_cnpj(cnpj_input) if cnpj_input.strip() else None
-
-# Se o usuário alterou o CNPJ após confirmar, reseta a confirmação
-if st.session_state.cnpj_confirmado and st.session_state.cnpj_confirmado != cnpj_formatado_atual:
-    st.session_state.cnpj_confirmado = None
-    st.session_state.empresa_info = None
-
-buscar = st.button(
-    "🔍 Buscar empresa",
-    disabled=(cnpj_formatado_atual is None),
-)
-
-if buscar and cnpj_formatado_atual:
-    with st.spinner("Consultando BrasilAPI..."):
-        info = consultar_empresa(limpar_cnpj(cnpj_formatado_atual))
-    if info:
-        st.session_state.empresa_info = info
-    else:
+    if st.session_state.arquivo_chave != _chave_atual:
+        # Arquivo novo — reseta tudo e tenta extrair CNPJ
+        st.session_state.arquivo_chave = _chave_atual
+        st.session_state.file_bytes = _bytes_atual
+        st.session_state.cnpj_confirmado = None
         st.session_state.empresa_info = None
-        st.error(
-            "❌ Não foi possível consultar essa empresa. "
-            "Verifique o CNPJ ou tente novamente em alguns segundos."
+        st.session_state.cnpj_extraido = None
+        st.session_state.nome_empresa_ocs = None
+        st.session_state.modo_manual = False
+
+        with st.spinner("🔍 Lendo documento e extraindo CNPJ..."):
+            try:
+                texto_doc = extrair_texto_documento(_bytes_atual, uploaded.name)
+                st.session_state.nome_empresa_ocs = extrair_nome_ocs(texto_doc)
+                cnpjs = extrair_cnpjs_texto(texto_doc)
+                if cnpjs:
+                    st.session_state.cnpj_extraido = cnpjs[0]
+                    info_auto = consultar_empresa(cnpjs[0])
+                    if info_auto:
+                        st.session_state.empresa_info = info_auto
+                else:
+                    st.session_state.modo_manual = True
+            except Exception as e:
+                st.session_state.modo_manual = True
+                st.error(f"Erro ao ler o documento: {e}")
+
+# Bloco de CNPJ — depende do estado atual
+if uploaded is not None:
+    if st.session_state.cnpj_confirmado:
+        # CNPJ já confirmado
+        info = st.session_state.empresa_info or {}
+        st.success(
+            f"✅ CNPJ confirmado: **{st.session_state.cnpj_confirmado}** — "
+            f"{info.get('razao_social', '')}"
         )
+        if st.button("🔄 Trocar CNPJ", help="Use outro CNPJ neste documento"):
+            st.session_state.cnpj_confirmado = None
+            st.session_state.empresa_info = None
+            st.session_state.modo_manual = True
+            st.rerun()
 
-# Empresa encontrada e ainda não confirmada → mostra dados + botão Confirmar
-if (
-    st.session_state.empresa_info
-    and st.session_state.cnpj_confirmado != cnpj_formatado_atual
-):
-    info = st.session_state.empresa_info
-    nome_fantasia = info.get('nome_fantasia', '').strip()
-    extra = ''
-    if nome_fantasia and nome_fantasia.lower() != info['razao_social'].strip().lower():
-        extra = f"  \n**Nome fantasia:** {nome_fantasia}"
-    st.markdown(
-        f"**Empresa encontrada:** {info['razao_social']}{extra}  \n"
-        f"**Situação cadastral:** {info['situacao']}"
-    )
-    if st.button("✅ Confirmar e usar este CNPJ", type="primary"):
-        st.session_state.cnpj_confirmado = cnpj_formatado_atual
+    elif st.session_state.cnpj_extraido and not st.session_state.modo_manual:
+        # CNPJ extraído automaticamente — pede confirmação
+        cnpj_fmt = _formatar_cnpj(st.session_state.cnpj_extraido)
+        info = st.session_state.empresa_info or {}
+        st.success(f"🔍 CNPJ extraído automaticamente do documento: **{cnpj_fmt}**")
+        if info:
+            nome_fantasia = info.get('nome_fantasia', '').strip()
+            extra = ''
+            if nome_fantasia and nome_fantasia.lower() != info.get('razao_social', '').strip().lower():
+                extra = f"  \n**Nome fantasia:** {nome_fantasia}"
+            st.markdown(
+                f"**Empresa:** {info.get('razao_social', '')}{extra}  \n"
+                f"**Situação cadastral:** {info.get('situacao', '')}"
+            )
+        else:
+            st.warning(
+                "⚠️ Não foi possível consultar a BrasilAPI agora. "
+                "Você pode confirmar o CNPJ mesmo assim ou digitar outro."
+            )
 
-# CNPJ confirmado → mensagem persistente
-if st.session_state.cnpj_confirmado:
-    info = st.session_state.empresa_info or {}
-    st.success(
-        f"✅ CNPJ confirmado: **{st.session_state.cnpj_confirmado}** — "
-        f"{info.get('razao_social', '')}"
-    )
+        col_conf, col_troc = st.columns([2, 1])
+        with col_conf:
+            if st.button("✅ Confirmar este CNPJ", type="primary", use_container_width=True):
+                st.session_state.cnpj_confirmado = cnpj_fmt
+                st.rerun()
+        with col_troc:
+            if st.button("🔄 Não é esse — digitar outro", use_container_width=True):
+                st.session_state.modo_manual = True
+                st.session_state.empresa_info = None
+                st.rerun()
+
+    else:
+        # Modo manual: extração falhou ou usuário pediu pra trocar
+        if not st.session_state.cnpj_extraido:
+            msg = "⚠️ Não consegui extrair o CNPJ automaticamente do documento."
+            if st.session_state.nome_empresa_ocs:
+                msg += f"\n\n**Empresa identificada no documento:** {st.session_state.nome_empresa_ocs}"
+            msg += "\n\nPor favor, digite o CNPJ manualmente:"
+            st.warning(msg)
+
+        cnpj_input = st.text_input(
+            "CNPJ da empresa",
+            placeholder="22.416.260/0001-85 ou apenas os 14 dígitos",
+            max_chars=18,
+        )
+        cnpj_formatado_atual = _formatar_cnpj(cnpj_input) if cnpj_input.strip() else None
+
+        if st.button("🔍 Buscar empresa", disabled=(cnpj_formatado_atual is None)):
+            with st.spinner("Consultando BrasilAPI..."):
+                info_m = consultar_empresa(limpar_cnpj(cnpj_formatado_atual))
+            if info_m:
+                st.session_state.empresa_info = info_m
+            else:
+                st.session_state.empresa_info = None
+                st.error(
+                    "❌ Não foi possível consultar essa empresa. "
+                    "Verifique o CNPJ ou tente novamente em alguns segundos."
+                )
+
+        if st.session_state.empresa_info and cnpj_formatado_atual:
+            info = st.session_state.empresa_info
+            nome_fantasia = info.get('nome_fantasia', '').strip()
+            extra = ''
+            if nome_fantasia and nome_fantasia.lower() != info['razao_social'].strip().lower():
+                extra = f"  \n**Nome fantasia:** {nome_fantasia}"
+            st.markdown(
+                f"**Empresa encontrada:** {info['razao_social']}{extra}  \n"
+                f"**Situação cadastral:** {info['situacao']}"
+            )
+            if st.button("✅ Confirmar e usar este CNPJ", type="primary"):
+                st.session_state.cnpj_confirmado = cnpj_formatado_atual
+                st.rerun()
 
 col1, col2 = st.columns(2)
 with col1:
@@ -642,7 +844,7 @@ if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirma
 
     progress = st.progress(0)
     status   = st.empty()
-    file_bytes = uploaded.read()
+    file_bytes = st.session_state.file_bytes or uploaded.getvalue()
 
     # PASSO 1 — CNPJ (já confirmado pelo usuário)
     cnpj = st.session_state.cnpj_confirmado
@@ -735,7 +937,7 @@ if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirma
         st.markdown("### Pagamentos incluídos:")
         import pandas as pd
         rows = [(d, dt, v) for d, dt, v, _ in pagamentos]
-        rows.append(("TOTAL PAGO", "", f"R$ {total_str}"))
+        rows.append(("", "Valor Total", f"R$ {total_str}"))
         df = pd.DataFrame(rows, columns=["Documento", "Data", "Valor"])
         st.dataframe(df, hide_index=True, use_container_width=True)
 
