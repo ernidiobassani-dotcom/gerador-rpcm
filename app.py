@@ -366,6 +366,7 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
     headers = {
         'chave-api-dados': api_key,
         'Accept': 'application/json',
+        'User-Agent': 'gerador-rpcm/1.0 (+https://github.com/ernidiobassani-dotcom/gerador-rpcm)',
     }
 
     # Cobre o ano informado e o ano anterior. Pagamentos de janeiro,
@@ -382,24 +383,35 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
     URL = 'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido'
 
     def _request_pagina(params):
-        """Faz a chamada com 1 retry simples se a API responder 200 mas com
-        body vazio/inválido — caso típico de rate limit ou carga temporária."""
-        for tentativa in (1, 2):
+        """Faz a chamada com até 3 tentativas e backoff. Detecta HTML
+        retornado em vez de JSON e dá mensagem clara — costuma indicar
+        chave inválida/expirada ou intercepção por proxy/firewall."""
+        for tentativa in (1, 2, 3):
             try:
                 r = requests.get(URL, params=params, headers=headers, timeout=30)
                 if r.status_code != 200:
                     return None, r.status_code, r.text[:300]
+                body_inicio = r.text[:200].lstrip().lower()
+                if body_inicio.startswith('<!doctype') or body_inicio.startswith('<html'):
+                    if tentativa < 3:
+                        time.sleep(1.5 * tentativa)
+                        continue
+                    return None, 200, (
+                        "API retornou HTML em vez de JSON — "
+                        "geralmente chave inválida/expirada ou request interceptado. "
+                        f"Trecho do body: '{r.text[:160].strip()}...'"
+                    )
                 try:
                     data = r.json()
                 except ValueError:
-                    if tentativa == 1:
-                        time.sleep(1.5)
+                    if tentativa < 3:
+                        time.sleep(1.5 * tentativa)
                         continue
-                    return None, 200, f"JSON inválido (body: '{r.text[:120]}')"
+                    return None, 200, f"JSON inválido (body: '{r.text[:160]}')"
                 return data, 200, None
             except Exception as e:
-                if tentativa == 1:
-                    time.sleep(1.5)
+                if tentativa < 3:
+                    time.sleep(1.5 * tentativa)
                     continue
                 return None, None, str(e)
         return None, None, 'falha após retries'
