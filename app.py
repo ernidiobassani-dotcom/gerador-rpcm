@@ -351,9 +351,11 @@ def extrair_texto_documento(file_bytes, filename):
 def get_pagamentos(cnpj_limpo, mes_num, ano):
     """Busca pagamentos via API oficial do Portal da Transparência.
 
-    Consulta ano atual E ano anterior, pois o parâmetro 'ano' refere-se ao
-    ano do empenho (orçamento), não ao ano do pagamento. Pagamentos de
-    janeiro/fevereiro/março frequentemente pertencem a empenhos do ano anterior.
+    Usa o parâmetro `mesAnoLancamento` (formato MM/AAAA) que filtra
+    pagamentos pela data de lançamento da fase — ou seja, pelo mês em
+    que o pagamento de fato aconteceu, independente do ano do empenho
+    ou do número do documento. Isso é o que o RPCM precisa: pagamentos
+    realizados no mês de referência.
     """
     api_key = st.secrets.get("TRANSPARENCIA_API_KEY", "")
 
@@ -362,44 +364,43 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
         'Accept': 'application/json',
     }
 
-    # Busca nos dois anos: ano do pagamento E ano anterior (empenhos do ano passado)
-    anos_busca = [int(ano), int(ano) - 1]
-
+    mes_ano = f'{mes_num:02d}/{ano}'
     todos = []
     ultimo_status = None
     ultimo_erro = None
 
-    for ano_busca in anos_busca:
-        pagina = 1
-        while True:
-            params = {
-                'codigoPessoa': cnpj_limpo,
-                'fase': 3,
-                'ano': ano_busca,
-                'pagina': pagina,
-            }
-            try:
-                r = requests.get(
-                    'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido',
-                    params=params,
-                    headers=headers,
-                    timeout=30,
-                )
-                ultimo_status = r.status_code
-                if r.status_code != 200:
-                    ultimo_erro = r.text[:300]
-                    break
-                data = r.json()
-                if not isinstance(data, list) or len(data) == 0:
-                    break
-                todos.extend(data)
-                if len(data) < 500:
-                    break
-                pagina += 1
-            except Exception as e:
-                ultimo_erro = str(e)
+    pagina = 1
+    while True:
+        params = {
+            'codigoPessoa': cnpj_limpo,
+            'fase': 3,  # 3 = Pagamento
+            'mesAnoLancamento': mes_ano,
+            'pagina': pagina,
+        }
+        try:
+            r = requests.get(
+                'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido',
+                params=params,
+                headers=headers,
+                timeout=30,
+            )
+            ultimo_status = r.status_code
+            if r.status_code != 200:
+                ultimo_erro = r.text[:300]
                 break
+            data = r.json()
+            if not isinstance(data, list) or len(data) == 0:
+                break
+            todos.extend(data)
+            if len(data) < 500:
+                break
+            pagina += 1
+        except Exception as e:
+            ultimo_erro = str(e)
+            break
 
+    # Verificação adicional: confirma que cada item está no mês/ano pedido.
+    # A API já filtra, mas mantemos a checagem como guarda de segurança.
     pagamentos = []
     mes_str = f'{mes_num:02d}'
     ano_str = str(ano)
@@ -407,10 +408,10 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
         data_pgto = item.get('data', item.get('dataDocumento', ''))
         data_str  = str(data_pgto)
         mes_ok = False
-        # BR format: DD/MM/YYYY  → posições 3-4 = mês, 6-9 = ano
+        # BR: DD/MM/YYYY → mês em [3:5], ano em [6:10]
         if len(data_str) >= 10 and data_str[2:3] == '/' and data_str[3:5] == mes_str and data_str[6:10] == ano_str:
             mes_ok = True
-        # ISO format: YYYY-MM-DD → posições 0-3 = ano, 5-6 = mês
+        # ISO: YYYY-MM-DD → ano em [0:4], mês em [5:7]
         elif len(data_str) >= 10 and data_str[4:5] == '-' and data_str[0:4] == ano_str and data_str[5:7] == mes_str:
             mes_ok = True
         if not mes_ok:
@@ -426,7 +427,7 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
         except Exception:
             pass
 
-    # Ordena por data (cronológica) e depois por documento — saída estável e legível
+    # Ordena por data (cronológica) e depois por documento — saída estável
     pagamentos.sort(key=lambda p: (_chave_data(p[1]), p[0]))
 
     return pagamentos, ultimo_status, ultimo_erro, todos
