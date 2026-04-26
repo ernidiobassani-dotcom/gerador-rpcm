@@ -368,10 +368,11 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
         'Accept': 'application/json',
     }
 
-    # Cobre o ano informado e os 2 anos anteriores. Pagamentos de janeiro,
-    # fevereiro e março costumam vir de empenhos emitidos no ano anterior;
-    # empenhos atrasados podem ser de 2 anos atrás.
-    anos_busca = [int(ano), int(ano) - 1, int(ano) - 2]
+    # Cobre o ano informado e o ano anterior. Pagamentos de janeiro,
+    # fevereiro e março costumam vir de empenhos emitidos no ano anterior.
+    # Empenhos mais antigos (2+ anos) são raros — se aparecer caso assim,
+    # o usuário poderá apontar e revemos a estratégia.
+    anos_busca = [int(ano), int(ano) - 1]
 
     todos = []
     ultimo_status = None
