@@ -176,32 +176,19 @@ footer {{ visibility: hidden; }}
 </style>
 """
 
-LOGO_SVG = f"""
-<svg class="logo" width="58" height="58" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
-  <!-- Escudo -->
-  <path d="M30 4 L52 11 V32 Q52 49 30 56 Q8 49 8 32 V11 Z"
-        fill="{COR_PAPEL}" stroke="{COR_DOURADO}" stroke-width="2"/>
-  <!-- Cruz médica -->
-  <rect x="26" y="17" width="8" height="24" fill="{COR_PRIMARIA}" rx="1"/>
-  <rect x="18" y="25" width="24" height="8" fill="{COR_PRIMARIA}" rx="1"/>
-  <!-- Detalhe dourado central -->
-  <circle cx="30" cy="29" r="2.2" fill="{COR_DOURADO}"/>
-</svg>
-"""
+LOGO_SVG = (
+    f'<svg class="logo" width="58" height="58" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">'
+    f'<path d="M30 4 L52 11 V32 Q52 49 30 56 Q8 49 8 32 V11 Z" fill="{COR_PAPEL}" stroke="{COR_DOURADO}" stroke-width="2"/>'
+    f'<rect x="26" y="17" width="8" height="24" fill="{COR_PRIMARIA}" rx="1"/>'
+    f'<rect x="18" y="25" width="24" height="8" fill="{COR_PRIMARIA}" rx="1"/>'
+    f'<circle cx="30" cy="29" r="2.2" fill="{COR_DOURADO}"/>'
+    f'</svg>'
+)
 
 st.markdown(CSS_GLOBAL, unsafe_allow_html=True)
 
 st.markdown(
-    f"""
-    <div class="app-header">
-      {LOGO_SVG}
-      <div>
-        <h1>Gerador de RPCM</h1>
-        <p>Relatório de Prestação de Contas Mensal &middot; Contratos de Credenciamento</p>
-      </div>
-    </div>
-    <div class="gold-divider"></div>
-    """,
+    f"""<div class="app-header">{LOGO_SVG}<div><h1>Gerador de RPCM</h1><p>Relatório de Prestação de Contas Mensal &middot; Contratos de Credenciamento</p></div></div><div class="gold-divider"></div>""",
     unsafe_allow_html=True,
 )
 
@@ -1142,11 +1129,7 @@ if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirma
 # ─── Rodapé ─────────────────────────────────────────────────────────────────
 
 st.markdown(
-    """
-    <div class="app-footer">
-      <strong>Aplicativo não oficial.</strong> Uso interno.<br>
-      Dados públicos do Portal da Transparência do Governo Federal · UG 167399
-    </div>
-    """,
+    '<div class="app-footer"><strong>Aplicativo não oficial.</strong> Uso interno.<br>'
+    'Dados públicos do Portal da Transparência do Governo Federal &middot; UG 167399</div>',
     unsafe_allow_html=True,
 )
