@@ -351,14 +351,14 @@ def extrair_texto_documento(file_bytes, filename):
 def get_pagamentos(cnpj_limpo, mes_num, ano):
     """Busca pagamentos via API oficial do Portal da Transparência.
 
-    A API exige o parâmetro `ano` (do documento/empenho) e aceita
-    `mesAnoLancamento` (mês/ano em que o pagamento foi lançado). Como
-    pagamentos de início de ano costumam vir de empenhos do ano anterior,
-    consultamos o ano informado e o ano-1 — em ambas as buscas, filtrando
-    pelo mês/ano de lançamento (a fase 3 = pagamento). Isso entrega só
-    os pagamentos realizados no mês de referência, mesmo que o empenho
-    seja antigo, sem cair no problema de paginação que aparecia quando
-    se buscava o ano inteiro.
+    A API só aceita filtro por `ano` (ano de **emissão do documento**, ou seja,
+    da OB), não por mês/ano de pagamento. Como pagamentos de um determinado
+    mês podem vir de OBs emitidas em anos anteriores (empenhos antigos),
+    consultamos o ano de referência e os 2 anos anteriores. Em seguida,
+    filtramos manualmente pela data efetiva do pagamento (campo `data` da
+    resposta) para manter só os documentos pagos no mês de referência.
+
+    Limite de paginação como salvaguarda contra loop em caso de bug da API.
     """
     api_key = st.secrets.get("TRANSPARENCIA_API_KEY", "")
 
@@ -367,21 +367,23 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
         'Accept': 'application/json',
     }
 
-    mes_ano = f'{mes_num:02d}/{ano}'
-    anos_busca = [int(ano), int(ano) - 1]
+    # Cobre o ano informado e os 2 anos anteriores. Pagamentos de janeiro,
+    # fevereiro e março costumam vir de empenhos emitidos no ano anterior;
+    # empenhos atrasados podem ser de 2 anos atrás.
+    anos_busca = [int(ano), int(ano) - 1, int(ano) - 2]
 
     todos = []
     ultimo_status = None
     ultimo_erro = None
+    MAX_PAGES = 50  # salvaguarda contra loop infinito
 
     for ano_busca in anos_busca:
         pagina = 1
-        while True:
+        while pagina <= MAX_PAGES:
             params = {
                 'codigoPessoa': cnpj_limpo,
                 'fase': 3,  # 3 = Pagamento
                 'ano': ano_busca,
-                'mesAnoLancamento': mes_ano,
                 'pagina': pagina,
             }
             try:
