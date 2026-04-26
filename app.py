@@ -383,12 +383,27 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
     URL = 'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido'
 
     def _request_pagina(params):
-        """Faz a chamada com até 3 tentativas e backoff. Detecta HTML
-        retornado em vez de JSON e dá mensagem clara — costuma indicar
-        chave inválida/expirada ou intercepção por proxy/firewall."""
+        """Faz a chamada com até 3 tentativas e backoff. Detecta indisponibilidade
+        do Portal (redirect 302 para landpage.cgu.gov.br/erro.html) e HTML em
+        vez de JSON, dando mensagem clara pra cada caso."""
         for tentativa in (1, 2, 3):
             try:
-                r = requests.get(URL, params=params, headers=headers, timeout=30)
+                r = requests.get(
+                    URL, params=params, headers=headers,
+                    timeout=30, allow_redirects=False,
+                )
+                # Redirect para a página de erro da CGU = Portal indisponível
+                if r.status_code in (301, 302, 303, 307, 308):
+                    location = r.headers.get('Location', '')
+                    if 'landpage.cgu.gov.br' in location or 'erro.html' in location:
+                        if tentativa < 3:
+                            time.sleep(1.5 * tentativa)
+                            continue
+                        return None, r.status_code, (
+                            "Portal da Transparência está fora do ar (instabilidade "
+                            "ou manutenção da CGU). Tente novamente em alguns minutos."
+                        )
+                    return None, r.status_code, f"Redirect inesperado para: {location}"
                 if r.status_code != 200:
                     return None, r.status_code, r.text[:300]
                 body_inicio = r.text[:200].lstrip().lower()
@@ -1076,6 +1091,14 @@ if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirma
     progress.progress(65)
 
     if len(pagamentos) == 0:
+        api_indisponivel = api_erro and 'fora do ar' in api_erro.lower()
+        if api_indisponivel:
+            st.error(
+                f"**Portal da Transparência está fora do ar.** {api_erro}\n\n"
+                "Tente novamente em alguns minutos. O relatório não será "
+                "gerado agora pra evitar arquivo com tabela vazia."
+            )
+            st.stop()
         msg = f"Nenhum pagamento encontrado para {mes_selecionado}/{ano}. O relatório será gerado com tabela vazia."
         if api_status and api_status != 200:
             msg += f"\n\n_API retornou status **{api_status}**._"
