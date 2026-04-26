@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import re
+import time
 import zipfile
 import shutil
 import copy
@@ -377,6 +378,31 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
     ultimo_erro = None
     MAX_PAGES = 50  # salvaguarda contra loop infinito
 
+    URL = 'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido'
+
+    def _request_pagina(params):
+        """Faz a chamada com 1 retry simples se a API responder 200 mas com
+        body vazio/inválido — caso típico de rate limit ou carga temporária."""
+        for tentativa in (1, 2):
+            try:
+                r = requests.get(URL, params=params, headers=headers, timeout=30)
+                if r.status_code != 200:
+                    return None, r.status_code, r.text[:300]
+                try:
+                    data = r.json()
+                except ValueError:
+                    if tentativa == 1:
+                        time.sleep(1.5)
+                        continue
+                    return None, 200, f"JSON inválido (body: '{r.text[:120]}')"
+                return data, 200, None
+            except Exception as e:
+                if tentativa == 1:
+                    time.sleep(1.5)
+                    continue
+                return None, None, str(e)
+        return None, None, 'falha após retries'
+
     for ano_busca in anos_busca:
         pagina = 1
         while pagina <= MAX_PAGES:
@@ -386,27 +412,19 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
                 'ano': ano_busca,
                 'pagina': pagina,
             }
-            try:
-                r = requests.get(
-                    'https://api.portaldatransparencia.gov.br/api-de-dados/despesas/documentos-por-favorecido',
-                    params=params,
-                    headers=headers,
-                    timeout=30,
-                )
-                ultimo_status = r.status_code
-                if r.status_code != 200:
-                    ultimo_erro = r.text[:300]
-                    break
-                data = r.json()
-                if not isinstance(data, list) or len(data) == 0:
-                    break
-                todos.extend(data)
-                if len(data) < 500:
-                    break
-                pagina += 1
-            except Exception as e:
-                ultimo_erro = str(e)
+            data, status, erro = _request_pagina(params)
+            ultimo_status = status if status is not None else ultimo_status
+            if erro is not None:
+                ultimo_erro = erro
                 break
+            if not isinstance(data, list) or len(data) == 0:
+                break
+            todos.extend(data)
+            if len(data) < 500:
+                break
+            pagina += 1
+            time.sleep(0.25)  # respeita rate limit entre páginas
+        time.sleep(0.4)  # respeita rate limit entre anos
 
     # Verificação adicional: confirma que cada item está no mês/ano pedido.
     # A API já filtra, mas mantemos a checagem como guarda de segurança.
