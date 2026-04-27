@@ -221,6 +221,11 @@ MESES_LISTA = [
     "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"
 ]
 
+# Unidade Gestora cujos pagamentos devem aparecer no RPCM. Filtra na API
+# pra trazer só os documentos emitidos por essa UG, ignorando pagamentos
+# feitos pelo mesmo CNPJ via outras UGs (ex.: aeronáutica, marinha, saúde).
+UG_PADRAO = "167399"
+
 # ODT namespaces
 NS_TEXT  = 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'
 NS_TABLE = 'urn:oasis:names:tc:opendocument:xmlns:table:1.0'
@@ -438,6 +443,7 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
                 'codigoPessoa': cnpj_limpo,
                 'fase': 3,  # 3 = Pagamento
                 'ano': ano_busca,
+                'ug': UG_PADRAO,
                 'pagina': pagina,
             }
             data, status, erro = _request_pagina(params)
