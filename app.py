@@ -395,7 +395,7 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
             try:
                 r = requests.get(
                     URL, params=params, headers=headers,
-                    timeout=30, allow_redirects=False,
+                    timeout=12, allow_redirects=False,
                 )
                 # Redirect para a página de erro da CGU = Portal indisponível
                 if r.status_code in (301, 302, 303, 307, 308):
@@ -1098,11 +1098,22 @@ if (gerar or gerar_mes_anterior) and uploaded and st.session_state.cnpj_confirma
 
     if len(pagamentos) == 0:
         api_indisponivel = api_erro and 'fora do ar' in api_erro.lower()
+        api_timeout = api_erro and ('timed out' in api_erro.lower() or 'timeout' in api_erro.lower())
         if api_indisponivel:
             st.error(
                 f"**Portal da Transparência está fora do ar.** {api_erro}\n\n"
                 "Tente novamente em alguns minutos. O relatório não será "
                 "gerado agora pra evitar arquivo com tabela vazia."
+            )
+            st.stop()
+        if api_timeout:
+            st.error(
+                "**A API não respondeu (timeout).** Geralmente isso indica "
+                "que a chave de API foi bloqueada temporariamente pela CGU "
+                "por excesso de uso. Aguarde 30 minutos a algumas horas e "
+                "tente novamente. Se persistir, gere uma nova chave em "
+                "https://portaldatransparencia.gov.br/api-de-dados/cadastrar-email "
+                "(uma única vez, sem repetir) e atualize no Streamlit Secrets."
             )
             st.stop()
         msg = f"Nenhum pagamento encontrado para {mes_selecionado}/{ano}. O relatório será gerado com tabela vazia."
