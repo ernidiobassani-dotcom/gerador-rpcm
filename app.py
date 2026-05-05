@@ -452,10 +452,11 @@ def get_pagamentos(cnpj_limpo, mes_num, ano):
                 ultimo_erro = erro
                 break
             if not isinstance(data, list) or len(data) == 0:
+                # Lista vazia = não há mais páginas. Esta é a única condição
+                # confiável de parada — a API retorna 30 itens por página por
+                # padrão, então tamanho da resposta não indica fim.
                 break
             todos.extend(data)
-            if len(data) < 500:
-                break
             pagina += 1
             time.sleep(0.25)  # respeita rate limit entre páginas
         time.sleep(0.4)  # respeita rate limit entre anos
